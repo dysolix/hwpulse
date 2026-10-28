@@ -37,7 +37,7 @@ pub fn gauge_card(ui: &mut Ui, reading: &Reading, history: Option<&VecDeque<f32>
     let width = 9.0;
     let center = pos2(inner.center().x, inner.top() + 26.0 + radius + width);
     let (start, sweep) = (0.75 * PI, 1.5 * PI);
-    let frac = fraction(reading).unwrap_or(0.0);
+    let frac = animated(ui, reading.id, fraction(reading).unwrap_or(0.0));
 
     arc(&painter, center, radius, start, sweep, Stroke::new(width, theme::TRACK));
     if frac > 0.0 {
@@ -94,6 +94,7 @@ pub fn stat_card(ui: &mut Ui, reading: &Reading, history: Option<&VecDeque<f32>>
 
     let mut bottom = inner.bottom();
     if let Some(frac) = fraction(reading) {
+        let frac = animated(ui, reading.id, frac);
         let bar = Rect::from_min_max(pos2(inner.left(), bottom - 4.0), pos2(inner.right(), bottom));
         painter.rect_filled(bar, CornerRadius::same(2), theme::TRACK);
         if frac > 0.0 {
@@ -120,6 +121,45 @@ fn card(ui: &mut Ui, height: f32) -> Rect {
         StrokeKind::Inside,
     );
     rect
+}
+
+#[derive(Clone, Copy)]
+struct Anim {
+    from: f32,
+    to: f32,
+    start: f64,
+}
+
+/// Eases (cubic ease-out) from the currently shown value to `target`. Repaints are
+/// only requested while an animation runs, so between updates the app still idles.
+fn animated(ui: &Ui, key: &str, target: f32) -> f32 {
+    const DURATION: f32 = 0.6;
+    let ctx = ui.ctx();
+    let id = ui.scope_id().with(key);
+    let now = ctx.input(|i| i.time);
+    let ease = |a: Anim| {
+        let t = ((now - a.start) as f32 / DURATION).clamp(0.0, 1.0);
+        (a.from + (a.to - a.from) * (1.0 - (1.0 - t).powi(3)), t)
+    };
+
+    let mut anim = ctx.data_mut(|d| {
+        *d.get_temp_mut_or(id, Anim { from: target, to: target, start: f64::NEG_INFINITY })
+    });
+    if anim.to != target {
+        // Start from wherever the running animation currently is. Sub-pixel changes
+        // (noise in power/load readings) snap instead of costing ~100 repaints.
+        let current = ease(anim).0;
+        let start = if (target - current).abs() < 0.004 { f64::NEG_INFINITY } else { now };
+        anim = Anim { from: current, to: target, start };
+        ctx.data_mut(|d| d.insert_temp(id, anim));
+    }
+
+    let (value, t) = ease(anim);
+    if t < 1.0 {
+        // 60 fps is plenty for a gauge; avoids rendering at the monitor's full refresh rate.
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+    }
+    value
 }
 
 fn fraction(r: &Reading) -> Option<f32> {
