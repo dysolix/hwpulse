@@ -61,7 +61,7 @@ impl SensorProvider for NvmlProvider {
 impl Gpu {
     fn poll(&self) -> Group {
         let d = &self.device;
-        let mut readings = Vec::with_capacity(7);
+        let mut readings = Vec::with_capacity(9);
 
         if let Ok(t) = d.temperature(TemperatureSensor::Gpu) {
             readings.push(Reading {
@@ -105,6 +105,30 @@ impl Gpu {
                 unit: Unit::Percent,
                 range: Some((0.0, 100.0)),
                 detail: None,
+                featured: false,
+            });
+        }
+
+        if let Ok(u) = d.encoder_utilization() {
+            readings.push(Reading {
+                id: "nvenc",
+                label: "Video encode",
+                value: u.utilization as f64,
+                unit: Unit::Percent,
+                range: Some((0.0, 100.0)),
+                detail: Some("NVENC".into()),
+                featured: false,
+            });
+        }
+
+        if let Ok(u) = d.decoder_utilization() {
+            readings.push(Reading {
+                id: "nvdec",
+                label: "Video decode",
+                value: u.utilization as f64,
+                unit: Unit::Percent,
+                range: Some((0.0, 100.0)),
+                detail: Some("NVDEC".into()),
                 featured: false,
             });
         }
