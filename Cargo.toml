@@ -1,0 +1,8 @@
+[package]
+name = "hwmon"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts"] }
+nvml-wrapper = "0.13.0"

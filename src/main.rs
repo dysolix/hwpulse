@@ -1,0 +1,19 @@
+// No console window in release builds.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod poller;
+mod sensors;
+mod ui;
+
+use eframe::egui;
+
+fn main() -> eframe::Result {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("Hardware Monitor")
+            .with_inner_size([660.0, 770.0])
+            .with_min_inner_size([520.0, 420.0]),
+        ..Default::default()
+    };
+    eframe::run_native("hwmon", options, Box::new(|cc| Ok(Box::new(ui::App::new(cc)))))
+}
