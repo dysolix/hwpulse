@@ -577,13 +577,55 @@ fn section_heading(ui: &mut Ui, title: &str, description: &str) {
     ui.label(egui::RichText::new(description).font(theme::regular(12.0)).color(theme::TEXT_FAINT));
 }
 
+/// Section heading that collapses its body when clicked. The open state is kept
+/// across restarts with the rest of egui's memory.
+fn collapsible_section(ui: &mut Ui, title: &str, note: &str, description: &str, body: impl FnOnce(&mut Ui)) {
+    let id = ui.scope_id().with(("section", title));
+    let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+    let openness = state.openness(ui.ctx());
+
+    let response = ui
+        .horizontal(|ui| {
+            let title = ui.painter().layout_no_wrap(title.to_owned(), theme::semibold(16.0), theme::TEXT);
+            let (rect, _) = ui.allocate_exact_size(vec2(title.size().x + 26.0, title.size().y), Sense::hover());
+            let hovered = ui.rect_contains_pointer(ui.max_rect().with_max_y(rect.bottom()));
+            ui.painter().galley(rect.min, title, theme::TEXT);
+            // Chevron pointing right when collapsed, down when open.
+            let c = egui::pos2(rect.right() - 8.0, rect.center().y);
+            let angle = openness * std::f32::consts::FRAC_PI_2;
+            let rot = egui::emath::Rot2::from_angle(angle);
+            let stroke = egui::Stroke::new(1.6, if hovered { theme::TEXT } else { theme::TEXT_FAINT });
+            let arm = |v: egui::Vec2| c + rot * v;
+            ui.painter().line(vec![arm(vec2(-2.5, -5.0)), arm(vec2(2.5, 0.0)), arm(vec2(-2.5, 5.0))], stroke);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(egui::RichText::new(note).font(theme::regular(12.0)).color(theme::TEXT_FAINT));
+            });
+        })
+        .response
+        .interact(Sense::click())
+        .on_hover_cursor(CursorIcon::PointingHand);
+    if response.clicked() {
+        state.toggle(ui);
+    }
+    ui.add_space(-8.0);
+    ui.label(egui::RichText::new(description).font(theme::regular(12.0)).color(theme::TEXT_FAINT));
+    state.show_body_unindented(ui, body);
+}
+
 fn dashboard_settings(ui: &mut Ui, model: &Model, settings: &mut Settings) {
-    section_heading(
+    let shown = model.groups.iter().filter(|g| settings.group_visible(g)).count();
+    collapsible_section(
         ui,
         "Dashboard",
+        &format!("{shown} of {} shown", model.groups.len()),
         "Drag the handle to reorder, switch components on or off and pick which values get a card. \
          GPUs, CPU and memory are shown by default; drives and network adapters start hidden.",
+        |ui| dashboard_list(ui, model, settings),
     );
+    ui.add_space(14.0);
+}
+
+fn dashboard_list(ui: &mut Ui, model: &Model, settings: &mut Settings) {
     let resets = [
         (!settings.visibility_is_default(), "Reset to default"),
         (!settings.order.is_empty(), "Reset order"),
@@ -605,7 +647,6 @@ fn dashboard_settings(ui: &mut Ui, model: &Model, settings: &mut Settings) {
     ui.spacing_mut().item_spacing.y = 10.0;
 
     reorder_list(ui, model, settings);
-    ui.add_space(14.0);
 }
 
 /// Drag-and-drop list of component cards. The dragged card floats above everything
