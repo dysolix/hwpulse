@@ -154,6 +154,10 @@ fn details(ui: &mut Ui, group: &Group, model: &Model, state: &mut State, view_he
 
     ui.add_space(6.0);
     values(ui, group);
+    if !group.info.is_empty() {
+        ui.add_space(4.0);
+        super::details_card(ui, &group.info);
+    }
     ui.add_space(10.0);
 
     let per_row = if ui.available_width() >= 900.0 { 3 } else { 2 };
@@ -313,6 +317,7 @@ fn summary(group: &Group) -> String {
         Kind::Disk | Kind::ExternalDisk => {
             ["active", "read", "write"].iter().filter_map(|id| get(id)).take(1).map(fmt).collect()
         }
+        Kind::Battery => ["charge", "rate"].iter().filter_map(|id| get(id)).map(fmt).collect(),
     };
     parts.join(" · ")
 }

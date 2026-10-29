@@ -8,7 +8,23 @@ eframe = { version = "0.37.0", default-features = false, features = ["glow", "de
 nvml-wrapper = "0.13.0"
 raw-window-handle = "0.6"
 serde = { version = "1.0.229", features = ["derive"] }
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_System_Performance", "Win32_System_Registry", "Win32_System_SystemInformation"] }
+windows = { version = "0.62", features = [
+    "Wdk_System_SystemInformation",
+    "Win32_Devices_Display",
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_NetworkManagement_WiFi",
+    "Win32_Networking_WinSock",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Performance",
+    "Win32_System_Power",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
 wmi = "0.18.4"
 
 [build-dependencies]

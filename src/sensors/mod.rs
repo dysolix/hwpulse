@@ -2,8 +2,12 @@
 //! later) implements [`SensorProvider`] and reports plain [`Group`]s of [`Reading`]s.
 //! The UI only knows about these types, so new providers need no UI changes.
 
+mod battery;
+mod displays;
+mod netinfo;
 pub mod nvml;
 mod pdh;
+mod processes;
 pub mod system;
 
 /// What a value means — drives formatting and colour in the UI.
@@ -18,6 +22,11 @@ pub enum Unit {
     BytesPerSec,
     /// Network throughput.
     BitsPerSec,
+    Milliseconds,
+    /// Events per second (context switches, page faults).
+    PerSecond,
+    /// A plain number (queue length, sessions).
+    Count,
 }
 
 #[derive(Clone, Debug)]
@@ -33,6 +42,76 @@ pub struct Reading {
     pub detail: Option<String>,
     /// Featured readings are drawn as large gauges.
     pub featured: bool,
+    /// Shown on the dashboard unless switched off in Settings. Readings for a closer
+    /// look (latencies, pools, PCIe traffic) only appear on the component pages
+    /// unless switched on.
+    pub dashboard: bool,
+}
+
+impl Reading {
+    /// A component-page-only reading; chain the setters for the rest.
+    pub fn new(id: &'static str, label: &'static str, value: f64, unit: Unit) -> Self {
+        Self { id, label, value, unit, range: None, detail: None, featured: false, dashboard: false }
+    }
+
+    pub fn range(mut self, lo: f64, hi: f64) -> Self {
+        self.range = Some((lo, hi));
+        self
+    }
+
+    pub fn detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+
+    pub fn on_dashboard(mut self) -> Self {
+        self.dashboard = true;
+        self
+    }
+}
+
+/// A fact about a component that is text rather than a measurement, e.g.
+/// `"PCIe link" → "Gen 4 × 16"`. Shown on the component and Performance pages.
+#[derive(Clone, Debug)]
+pub struct Info {
+    pub label: String,
+    pub value: String,
+}
+
+pub fn info(label: impl Into<String>, value: impl Into<String>) -> Info {
+    Info { label: label.into(), value: value.into() }
+}
+
+/// The processes using a component the most, e.g. by CPU time or memory.
+#[derive(Clone, Debug)]
+pub struct Processes {
+    /// What the list is sorted by, e.g. `"CPU"`.
+    pub metric: &'static str,
+    pub unit: Unit,
+    pub items: Vec<ProcessItem>,
+}
+
+/// One program; several processes of the same executable (browser tabs) are summed.
+#[derive(Clone, Debug)]
+pub struct ProcessItem {
+    pub name: String,
+    pub count: u32,
+    pub value: f64,
+}
+
+/// The `n` largest of `(name, value)` pairs, summed per name.
+pub fn top_processes(entries: impl IntoIterator<Item = (String, f64)>, n: usize) -> Vec<ProcessItem> {
+    let mut by_name: std::collections::HashMap<String, (u32, f64)> = std::collections::HashMap::new();
+    for (name, value) in entries {
+        let e = by_name.entry(name).or_default();
+        e.0 += 1;
+        e.1 += value;
+    }
+    let mut items: Vec<ProcessItem> =
+        by_name.into_iter().map(|(name, (count, value))| ProcessItem { name, count, value }).collect();
+    items.sort_by(|a, b| b.value.total_cmp(&a.value).then_with(|| a.name.cmp(&b.name)));
+    items.truncate(n);
+    items
 }
 
 /// One physical component (a GPU, a CPU, a disk …).
@@ -48,6 +127,10 @@ pub struct Group {
     pub readings: Vec<Reading>,
     /// Optional fine-grained values (e.g. per CPU thread), shown on the detail page.
     pub breakdown: Option<Breakdown>,
+    /// Text facts for the detail pages, in display order.
+    pub info: Vec<Info>,
+    /// Top processes, shown on the detail page.
+    pub processes: Option<Processes>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -59,6 +142,7 @@ pub enum Kind {
     /// USB sticks, USB enclosures and other hot-pluggable drives.
     ExternalDisk,
     Network,
+    Battery,
 }
 
 impl Kind {
@@ -70,6 +154,7 @@ impl Kind {
             Kind::Disk => "Storage",
             Kind::ExternalDisk => "External storage",
             Kind::Network => "Network",
+            Kind::Battery => "Battery",
         }
     }
 }
@@ -97,6 +182,7 @@ pub mod order {
     pub const GPU: u16 = 0;
     pub const CPU: u16 = 100;
     pub const MEMORY: u16 = 200;
+    pub const BATTERY: u16 = 250;
     pub const NETWORK: u16 = 300;
     pub const DISK: u16 = 400;
 }

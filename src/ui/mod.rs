@@ -643,7 +643,8 @@ fn dashboard_settings(ui: &mut Ui, model: &Model, settings: &mut Settings) {
         "Dashboard",
         &format!("{shown} of {} shown", model.groups.len()),
         "Drag the handle to reorder, switch components on or off and pick which values get a card. \
-         GPUs, CPU and memory are shown by default; drives and network adapters start hidden.",
+         GPUs, CPU and memory are shown by default; drives and network adapters start hidden. \
+         Values for a closer look (latencies, pools, PCIe traffic …) start off and stay on the component page.",
         |ui| dashboard_list(ui, model, settings),
     );
     ui.add_space(14.0);
@@ -869,9 +870,9 @@ fn settings_card(ui: &mut Ui, group: &Group, settings: &mut Settings, handle_id:
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
                 for r in &group.readings {
-                    let on = settings.reading_visible(&group.id, r.id);
+                    let on = settings.reading_visible(&group.id, r);
                     if widgets::chip(ui, r.label, on, visible, color).clicked() {
-                        settings.toggle_reading(&group.id, r.id);
+                        settings.toggle_reading(&group.id, r);
                     }
                 }
             });
@@ -926,7 +927,110 @@ fn detail(ui: &mut Ui, model: &Model, id: &str, nav: &mut Option<Page>) {
             });
         }
     }
+
+    if let Some(processes) = group.processes.as_ref() {
+        ui.add_space(14.0);
+        subsection(ui, "Top processes", &format!("By {}, refreshed every second", processes.metric));
+        processes_card(ui, processes, theme::kind_color(group.kind));
+    }
+    if !group.info.is_empty() {
+        ui.add_space(14.0);
+        subsection(ui, "Details", "");
+        details_card(ui, &group.info);
+    }
     ui.add_space(14.0);
+}
+
+fn subsection(ui: &mut Ui, title: &str, subtitle: &str) {
+    ui.label(egui::RichText::new(title).font(theme::semibold(16.0)).color(theme::TEXT));
+    if !subtitle.is_empty() {
+        ui.add_space(-8.0);
+        ui.label(egui::RichText::new(subtitle).font(theme::regular(12.0)).color(theme::TEXT_FAINT));
+    }
+    ui.add_space(4.0);
+}
+
+fn card_frame() -> Frame {
+    Frame::new()
+        .fill(theme::SURFACE)
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .corner_radius(CornerRadius::same(theme::CARD_RADIUS))
+        .inner_margin(Margin::symmetric(20, 14))
+}
+
+/// Label/value pairs flowing in as many columns as fit, filled column by column so
+/// related facts stay together.
+fn details_card(ui: &mut Ui, facts: &[crate::sensors::Info]) {
+    const MIN_COLUMN: f32 = 300.0;
+    const ROW: f32 = 26.0;
+    card_frame().show(ui, |ui| {
+        let width = ui.available_width();
+        let columns = ((width / MIN_COLUMN) as usize).clamp(1, 3);
+        let rows = facts.len().div_ceil(columns);
+        let column = width / columns as f32;
+        let (rect, _) = ui.allocate_exact_size(vec2(width, rows as f32 * ROW), Sense::hover());
+        let painter = ui.painter_at(rect);
+        let label_width = (column * 0.38).min(150.0);
+        for (i, fact) in facts.iter().enumerate() {
+            let (col, row) = (i / rows, i % rows);
+            let origin = rect.min + vec2(col as f32 * column, row as f32 * ROW + ROW / 2.0);
+            let label =
+                widgets::elided(&painter, &fact.label, theme::regular(12.5), theme::TEXT_DIM, label_width - 10.0);
+            painter.galley(origin - vec2(0.0, label.size().y / 2.0), label, theme::TEXT_DIM);
+            let value =
+                widgets::elided(&painter, &fact.value, theme::regular(13.0), theme::TEXT, column - label_width - 16.0);
+            painter.galley(origin + vec2(label_width, -value.size().y / 2.0), value, theme::TEXT);
+        }
+    });
+}
+
+/// Ranked list with a bar per program, relative to the busiest one (or to 100 % for
+/// percentages, so a lone 3 % process does not look maxed out).
+fn processes_card(ui: &mut Ui, processes: &crate::sensors::Processes, color: egui::Color32) {
+    const ROW: f32 = 30.0;
+    card_frame().show(ui, |ui| {
+        let width = ui.available_width();
+        if processes.items.is_empty() {
+            ui.label(
+                egui::RichText::new("Nothing measurable right now").font(theme::regular(12.5)).color(theme::TEXT_FAINT),
+            );
+            return;
+        }
+        let (rect, _) = ui.allocate_exact_size(vec2(width, processes.items.len() as f32 * ROW), Sense::hover());
+        let painter = ui.painter_at(rect);
+        let max = match processes.unit {
+            crate::sensors::Unit::Percent => 100.0,
+            _ => processes.items.iter().map(|p| p.value).fold(0.0, f64::max).max(f64::EPSILON),
+        };
+        let value_width = 96.0;
+        let bar_width = (width * 0.28).clamp(60.0, 220.0);
+        let name_width = width - value_width - bar_width - 24.0;
+        for (i, p) in processes.items.iter().enumerate() {
+            let y = rect.top() + i as f32 * ROW + ROW / 2.0;
+            let name = if p.count > 1 { format!("{}  ×{}", p.name, p.count) } else { p.name.clone() };
+            let galley = widgets::elided(&painter, &name, theme::regular(13.0), theme::TEXT, name_width);
+            painter.galley(egui::pos2(rect.left(), y - galley.size().y / 2.0), galley, theme::TEXT);
+
+            let track = Rect::from_min_size(
+                egui::pos2(rect.right() - value_width - bar_width - 12.0, y - 3.0),
+                vec2(bar_width, 6.0),
+            );
+            painter.rect_filled(track, CornerRadius::same(3), theme::TRACK);
+            let fill = (p.value / max).clamp(0.0, 1.0) as f32;
+            painter.rect_filled(
+                Rect::from_min_size(track.min, vec2((bar_width * fill).max(3.0), 6.0)),
+                CornerRadius::same(3),
+                color,
+            );
+            painter.text(
+                egui::pos2(rect.right(), y),
+                Align2::RIGHT_CENTER,
+                widgets::format_value(p.value, processes.unit),
+                theme::semibold(13.0),
+                theme::TEXT,
+            );
+        }
+    });
 }
 
 /// As many columns as fit (min. cell width), preferring a count that divides the

@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::sensors::{Group, Kind};
+use crate::sensors::{Group, Kind, Reading};
 
 pub const STORAGE_KEY: &str = "settings";
 
@@ -19,8 +19,11 @@ pub struct Settings {
     pub hidden_groups: BTreeSet<String>,
     /// [`Group::id`]s shown on the dashboard although hidden by default.
     pub shown_groups: BTreeSet<String>,
-    /// `"{group id}/{reading id}"` of individual cards hidden from the dashboard.
+    /// `"{group id}/{reading id}"` of cards hidden from the dashboard although shown
+    /// by default.
     pub hidden_readings: BTreeSet<String>,
+    /// `"{group id}/{reading id}"` of component-page-only readings added to the dashboard.
+    pub shown_readings: BTreeSet<String>,
     /// Custom dashboard order as [`Group::id`]s; empty means the default order.
     pub order: Vec<String>,
     /// Let charts slide while the window is not focused; otherwise they jump once
@@ -37,8 +40,9 @@ impl Settings {
         }
     }
 
-    pub fn reading_visible(&self, group: &str, reading: &str) -> bool {
-        !self.hidden_readings.contains(&reading_key(group, reading))
+    pub fn reading_visible(&self, group: &str, reading: &Reading) -> bool {
+        let key = reading_key(group, reading.id);
+        if reading.dashboard { !self.hidden_readings.contains(&key) } else { self.shown_readings.contains(&key) }
     }
 
     pub fn toggle_group(&mut self, group: &Group) {
@@ -48,22 +52,27 @@ impl Settings {
         }
     }
 
-    pub fn toggle_reading(&mut self, group: &str, reading: &str) {
-        let key = reading_key(group, reading);
-        if !self.hidden_readings.remove(&key) {
-            self.hidden_readings.insert(key);
+    pub fn toggle_reading(&mut self, group: &str, reading: &Reading) {
+        let key = reading_key(group, reading.id);
+        let overrides = if reading.dashboard { &mut self.hidden_readings } else { &mut self.shown_readings };
+        if !overrides.remove(&key) {
+            overrides.insert(key);
         }
     }
 
     pub fn visibility_is_default(&self) -> bool {
-        self.hidden_groups.is_empty() && self.shown_groups.is_empty() && self.hidden_readings.is_empty()
+        self.hidden_groups.is_empty()
+            && self.shown_groups.is_empty()
+            && self.hidden_readings.is_empty()
+            && self.shown_readings.is_empty()
     }
 
-    /// Restores the default components and shows every card again; order is kept.
+    /// Restores the default components and cards; order is kept.
     pub fn reset_visibility(&mut self) {
         self.hidden_groups.clear();
         self.shown_groups.clear();
         self.hidden_readings.clear();
+        self.shown_readings.clear();
     }
 
     /// `groups` (in default order) rearranged by the custom order. Components missing
@@ -110,11 +119,17 @@ impl Settings {
         self.ordered(groups)
             .into_iter()
             .filter(|g| self.group_visible(g))
-            .map(|g| {
-                let mut g = g.clone();
-                let id = g.id.clone();
-                g.readings.retain(|r| self.reading_visible(&id, r.id));
-                g
+            .map(|g| Group {
+                id: g.id.clone(),
+                kind: g.kind,
+                order: g.order,
+                title: g.title.clone(),
+                subtitle: g.subtitle.clone(),
+                readings: g.readings.iter().filter(|r| self.reading_visible(&g.id, r)).cloned().collect(),
+                // Detail-page data is not needed on the dashboard.
+                breakdown: None,
+                info: Vec::new(),
+                processes: None,
             })
             .filter(|g| !g.readings.is_empty())
             .collect()
@@ -122,7 +137,7 @@ impl Settings {
 }
 
 fn shown_by_default(kind: Kind) -> bool {
-    matches!(kind, Kind::Gpu | Kind::Cpu | Kind::Memory)
+    matches!(kind, Kind::Gpu | Kind::Cpu | Kind::Memory | Kind::Battery)
 }
 
 fn reading_key(group: &str, reading: &str) -> String {
@@ -149,8 +164,30 @@ mod tests {
                 subtitle: String::new(),
                 readings: Vec::new(),
                 breakdown: None,
+                info: Vec::new(),
+                processes: None,
             })
             .collect()
+    }
+
+    #[test]
+    fn detail_readings_stay_off_the_dashboard_until_switched_on() {
+        use crate::sensors::Unit;
+        let mut g = groups(&["gpu"]);
+        let load = Reading::new("load", "Load", 1.0, Unit::Percent).on_dashboard();
+        let pcie = Reading::new("pcie_rx", "PCIe", 1.0, Unit::BytesPerSec);
+        g[0].readings = vec![load.clone(), pcie.clone()];
+        let shown = |s: &Settings| s.dashboard_groups(&g)[0].readings.iter().map(|r| r.id).collect::<Vec<_>>();
+
+        let mut s = Settings::default();
+        assert_eq!(shown(&s), ["load"]);
+        s.toggle_reading("gpu", &pcie);
+        assert_eq!(shown(&s), ["load", "pcie_rx"]);
+        s.toggle_reading("gpu", &load);
+        assert_eq!(shown(&s), ["pcie_rx"]);
+        s.toggle_reading("gpu", &load);
+        s.toggle_reading("gpu", &pcie);
+        assert!(s.visibility_is_default());
     }
 
     fn ids(groups: &[&Group]) -> Vec<String> {

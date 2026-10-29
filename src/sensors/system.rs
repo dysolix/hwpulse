@@ -5,19 +5,35 @@
 use std::collections::HashMap;
 
 use serde::Deserialize;
-use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+use windows::Win32::System::SystemInformation::{
+    CACHE_RELATIONSHIP, GetLogicalProcessorInformationEx, GetPhysicallyInstalledSystemMemory, GetTickCount64,
+    GlobalMemoryStatusEx, MEMORYSTATUSEX, RelationCache, SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
+};
+use windows::core::HSTRING;
 
+use super::netinfo::{Adapter, Wifi};
 use super::pdh::{Counter, Query};
-use super::{Breakdown, BreakdownItem, Group, Kind, Reading, SensorProvider, Unit, order};
+use super::processes::{Sampler, Snapshot};
+use super::{
+    Breakdown, BreakdownItem, Group, Info, Kind, Processes, Reading, SensorProvider, Unit, info, order, top_processes,
+};
 
 pub struct SystemProvider {
     query: Query,
     cpu: Cpu,
+    memory: Memory,
     disk: Disk,
     net: Net,
     inventory: Inventory,
     /// Disk instances seen on the last poll, to notice plug/unplug.
     known_disks: Vec<String>,
+    sampler: Sampler,
+    battery: Option<super::battery::Battery>,
+    wifi: Option<Wifi>,
+    /// Adapter addresses, refreshed every few polls (they rarely change).
+    adapters: Vec<Adapter>,
+    polls: u32,
 }
 
 struct Cpu {
@@ -27,12 +43,33 @@ struct Cpu {
     thread_utility: Option<Counter>,
     thread_frequency: Option<Counter>,
     thread_performance: Option<Counter>,
+    interrupt: Option<Counter>,
+    dpc: Option<Counter>,
+    c1: Option<Counter>,
+    c2: Option<Counter>,
+    c3: Option<Counter>,
+    context_switches: Option<Counter>,
+    queue: Option<Counter>,
+}
+
+struct Memory {
+    standby_core: Option<Counter>,
+    standby_normal: Option<Counter>,
+    standby_reserve: Option<Counter>,
+    modified: Option<Counter>,
+    paged_pool: Option<Counter>,
+    nonpaged_pool: Option<Counter>,
+    hard_faults: Option<Counter>,
+    page_file: Option<Counter>,
 }
 
 struct Disk {
     read: Option<Counter>,
     write: Option<Counter>,
     idle: Option<Counter>,
+    read_latency: Option<Counter>,
+    write_latency: Option<Counter>,
+    queue: Option<Counter>,
 }
 
 struct Net {
@@ -51,11 +88,31 @@ impl SystemProvider {
             thread_utility: query.add(r"\Processor Information(*)\% Processor Utility"),
             thread_frequency: query.add(r"\Processor Information(*)\Processor Frequency"),
             thread_performance: query.add(r"\Processor Information(*)\% Processor Performance"),
+            interrupt: query.add(r"\Processor Information(_Total)\% Interrupt Time"),
+            dpc: query.add(r"\Processor Information(_Total)\% DPC Time"),
+            c1: query.add(r"\Processor Information(_Total)\% C1 Time"),
+            c2: query.add(r"\Processor Information(_Total)\% C2 Time"),
+            c3: query.add(r"\Processor Information(_Total)\% C3 Time"),
+            context_switches: query.add(r"\System\Context Switches/sec"),
+            queue: query.add(r"\System\Processor Queue Length"),
+        };
+        let memory = Memory {
+            standby_core: query.add(r"\Memory\Standby Cache Core Bytes"),
+            standby_normal: query.add(r"\Memory\Standby Cache Normal Priority Bytes"),
+            standby_reserve: query.add(r"\Memory\Standby Cache Reserve Bytes"),
+            modified: query.add(r"\Memory\Modified Page List Bytes"),
+            paged_pool: query.add(r"\Memory\Pool Paged Bytes"),
+            nonpaged_pool: query.add(r"\Memory\Pool Nonpaged Bytes"),
+            hard_faults: query.add(r"\Memory\Page Reads/sec"),
+            page_file: query.add(r"\Paging File(_Total)\% Usage"),
         };
         let disk = Disk {
             read: query.add(r"\PhysicalDisk(*)\Disk Read Bytes/sec"),
             write: query.add(r"\PhysicalDisk(*)\Disk Write Bytes/sec"),
             idle: query.add(r"\PhysicalDisk(*)\% Idle Time"),
+            read_latency: query.add(r"\PhysicalDisk(*)\Avg. Disk sec/Read"),
+            write_latency: query.add(r"\PhysicalDisk(*)\Avg. Disk sec/Write"),
+            queue: query.add(r"\PhysicalDisk(*)\Current Disk Queue Length"),
         };
         let net = Net {
             received: query.add(r"\Network Interface(*)\Bytes Received/sec"),
@@ -64,11 +121,27 @@ impl SystemProvider {
         };
         // Prime rate counters so the first real poll has a baseline.
         query.collect();
+        let inventory = Inventory::load();
+        let mut sampler = Sampler::new(inventory.logical_processors);
+        sampler.sample();
 
-        Ok(Self { query, cpu, disk, net, inventory: Inventory::load(), known_disks: Vec::new() })
+        Ok(Self {
+            query,
+            cpu,
+            memory,
+            disk,
+            net,
+            inventory,
+            known_disks: Vec::new(),
+            sampler,
+            battery: super::battery::Battery::detect(),
+            wifi: Wifi::open(),
+            adapters: Vec::new(),
+            polls: 0,
+        })
     }
 
-    fn cpu_group(&self) -> Group {
+    fn cpu_group(&self, snapshot: &Snapshot) -> Group {
         let q = &self.query;
         let mut readings = Vec::new();
 
@@ -81,6 +154,7 @@ impl SystemProvider {
                 range: Some((0.0, 100.0)),
                 detail: None,
                 featured: false,
+                dashboard: true,
             });
         }
 
@@ -96,6 +170,7 @@ impl SystemProvider {
                 range: None,
                 detail: Some(format!("base {:.1} GHz", freq / 1000.0)),
                 featured: false,
+                dashboard: true,
             });
         }
 
@@ -111,10 +186,41 @@ impl SystemProvider {
                 range: Some((0.0, 100.0)),
                 detail: Some(busiest.label.to_lowercase()),
                 featured: false,
+                dashboard: true,
             });
         }
 
+        // Component page only: where CPU time goes besides programs, and how deep
+        // the cores sleep while idle.
+        let value = |c: Option<Counter>| c.and_then(|c| q.value(c));
+        let percent = |id, label, c, detail: &str| {
+            value(c)
+                .map(|v| Reading::new(id, label, v.clamp(0.0, 100.0), Unit::Percent).range(0.0, 100.0).detail(detail))
+        };
+        readings.extend(percent("interrupt", "Interrupts", self.cpu.interrupt, "hardware interrupt time"));
+        readings.extend(percent("dpc", "DPCs", self.cpu.dpc, "deferred driver work"));
+        readings.extend(percent("c1", "Light sleep (C1)", self.cpu.c1, "share of time"));
+        let deep = value(self.cpu.c2).map(|c2| c2 + value(self.cpu.c3).unwrap_or(0.0));
+        readings.extend(deep.map(|v| {
+            Reading::new("c2", "Deep sleep (C2+)", v.clamp(0.0, 100.0), Unit::Percent)
+                .range(0.0, 100.0)
+                .detail("share of time")
+        }));
+        if let Some(v) = value(self.cpu.context_switches) {
+            readings.push(Reading::new("ctx", "Context switches", v, Unit::PerSecond));
+        }
+        if let Some(v) = value(self.cpu.queue) {
+            readings.push(Reading::new("queue", "Ready queue", v, Unit::Count).detail("threads waiting for a core"));
+        }
+
         let inv = &self.inventory;
+        let mut facts: Vec<Info> = inv.cpu_info.clone();
+        facts.push(info("Processes", snapshot.processes.len().to_string()));
+        facts.push(info("Threads", snapshot.threads.to_string()));
+        facts.push(info("Handles", snapshot.handles.to_string()));
+        facts.push(info("Up time", uptime()));
+
+        let by_cpu = snapshot.processes.iter().filter(|p| p.cpu > 0.0).map(|p| (p.name.clone(), p.cpu));
         Group {
             id: "cpu".into(),
             kind: Kind::Cpu,
@@ -129,6 +235,8 @@ impl SystemProvider {
                 range: Some((0.0, 100.0)),
                 items: threads,
             }),
+            info: facts,
+            processes: Some(Processes { metric: "CPU", unit: Unit::Percent, items: top_processes(by_cpu, 8) }),
         }
     }
 
@@ -163,7 +271,7 @@ impl SystemProvider {
         threads.into_iter().map(|(_, t)| t).collect()
     }
 
-    fn memory_group(&self) -> Option<Group> {
+    fn memory_group(&self, snapshot: &Snapshot) -> Option<Group> {
         let mut m = MEMORYSTATUSEX { dwLength: size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
         unsafe { GlobalMemoryStatusEx(&mut m) }.ok()?;
 
@@ -180,6 +288,7 @@ impl SystemProvider {
                 range: Some((0.0, total)),
                 detail: Some(format!("of {:.1} GB", total / 1024.0)),
                 featured: false,
+                dashboard: true,
             },
             Reading {
                 id: "available",
@@ -189,6 +298,7 @@ impl SystemProvider {
                 range: None,
                 detail: None,
                 featured: false,
+                dashboard: true,
             },
             Reading {
                 id: "committed",
@@ -198,26 +308,92 @@ impl SystemProvider {
                 range: Some((0.0, commit_limit)),
                 detail: Some(format!("of {:.1} GB", commit_limit / 1024.0)),
                 featured: false,
+                dashboard: true,
             },
         ];
 
+        // Component page only: how the rest of RAM is used, like Task Manager's
+        // memory composition.
+        let q = &self.query;
+        let bytes = |c: Option<Counter>| c.and_then(|c| q.value(c)).map(|v| v / MIB);
+        let mut readings = readings;
+        let standby = [self.memory.standby_core, self.memory.standby_normal, self.memory.standby_reserve]
+            .into_iter()
+            .filter_map(bytes)
+            .sum::<f64>();
+        let modified = bytes(self.memory.modified).unwrap_or(0.0);
+        readings.push(
+            Reading::new("cached", "Cached", standby + modified, Unit::Mebibytes)
+                .range(0.0, total)
+                .detail("file cache, freed on demand"),
+        );
+        if let Some(compressed) = snapshot.compressed_bytes {
+            readings.push(
+                Reading::new("compressed", "Compressed", compressed as f64 / MIB, Unit::Mebibytes)
+                    .detail("in-memory compression store"),
+            );
+        }
+        if let Some(v) = bytes(self.memory.paged_pool) {
+            readings.push(Reading::new("paged", "Paged pool", v, Unit::Mebibytes).detail("kernel, may go to disk"));
+        }
+        if let Some(v) = bytes(self.memory.nonpaged_pool) {
+            readings
+                .push(Reading::new("nonpaged", "Non-paged pool", v, Unit::Mebibytes).detail("kernel, always in RAM"));
+        }
+        if let Some(v) = self.memory.page_file.and_then(|c| q.value(c)) {
+            readings.push(
+                Reading::new("pagefile", "Page file", v.clamp(0.0, 100.0), Unit::Percent)
+                    .range(0.0, 100.0)
+                    .detail("in use"),
+            );
+        }
+        if let Some(v) = self.memory.hard_faults.and_then(|c| q.value(c)) {
+            readings.push(Reading::new("hardfaults", "Hard faults", v, Unit::PerSecond).detail("reads from disk"));
+        }
+
         let inv = &self.inventory;
+        let mut facts = inv.memory_info.clone();
+        if let Some(installed_kb) = inv.installed_kb {
+            let reserved = installed_kb as f64 / 1024.0 - total;
+            if reserved > 0.0 {
+                facts.push(info("Hardware reserved", format!("{reserved:.0} MB")));
+            }
+        }
+        // The compression store is already the "Compressed" reading, not a program.
+        let by_memory = snapshot
+            .processes
+            .iter()
+            .filter(|p| p.name != "Memory Compression")
+            .map(|p| (p.name.clone(), p.private_bytes as f64 / MIB));
         Some(Group {
             id: "memory".into(),
             kind: Kind::Memory,
             order: order::MEMORY,
             breakdown: None,
+            info: facts,
+            processes: Some(Processes { metric: "Memory", unit: Unit::Mebibytes, items: top_processes(by_memory, 8) }),
             title: inv.memory_name.clone().unwrap_or_else(|| format!("{:.0} GB Memory", total / 1024.0)),
             subtitle: inv.memory_modules.clone().unwrap_or_default(),
             readings,
         })
     }
 
-    fn disk_groups(&mut self) -> Vec<Group> {
+    fn disk_groups(&mut self, snapshot: &Snapshot) -> Vec<Group> {
         let q = &self.query;
         let read = by_instance(q, self.disk.read);
         let write = by_instance(q, self.disk.write);
         let idle = by_instance(q, self.disk.idle);
+        let read_latency = by_instance(q, self.disk.read_latency);
+        let write_latency = by_instance(q, self.disk.write_latency);
+        let queue = by_instance(q, self.disk.queue);
+        let system_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+        // Per-process I/O is not split by drive; every disk page shows the same list.
+        let by_io: Vec<(String, f64)> = snapshot
+            .processes
+            .iter()
+            .filter(|p| p.io_bytes_per_sec > 0.0)
+            .map(|p| (p.name.clone(), p.io_bytes_per_sec))
+            .collect();
 
         let mut instances: Vec<&String> = read.keys().filter(|n| *n != "_Total").collect();
         instances.sort();
@@ -248,7 +424,7 @@ impl SystemProvider {
                 // Instance names look like "0 C:" or "1 D: E:".
                 let (index, letters) = instance.split_once(' ').unwrap_or((instance, ""));
                 let index: u32 = index.parse().unwrap_or(u32::MAX);
-                let info = self.inventory.disks.get(&index);
+                let drive = self.inventory.disks.get(&index);
 
                 let mut readings = vec![
                     throughput("read", "Read", read[instance], Unit::BytesPerSec, None),
@@ -263,33 +439,92 @@ impl SystemProvider {
                         range: Some((0.0, 100.0)),
                         detail: None,
                         featured: false,
+                        dashboard: true,
                     });
                 }
 
-                let mut subtitle: Vec<String> = info.and_then(DiskInfo::type_label).into_iter().collect();
+                // Component page only: response times, waiting requests, filled space.
+                let ms = |m: &HashMap<String, f64>| m.get(instance).map(|s| s * 1000.0);
+                if let Some(v) = ms(&read_latency) {
+                    readings.push(
+                        Reading::new("read_ms", "Read latency", v, Unit::Milliseconds).detail("average per read"),
+                    );
+                }
+                if let Some(v) = ms(&write_latency) {
+                    readings.push(
+                        Reading::new("write_ms", "Write latency", v, Unit::Milliseconds).detail("average per write"),
+                    );
+                }
+                if let Some(v) = queue.get(instance) {
+                    readings.push(Reading::new("queue", "Queue", *v, Unit::Count).detail("requests waiting"));
+                }
+                let volumes: Vec<(&str, u64, u64)> = letters
+                    .split_whitespace()
+                    .filter_map(|l| volume_space(l).map(|(free, total)| (l, free, total)))
+                    .collect();
+                let (free, total): (u64, u64) = volumes.iter().fold((0, 0), |(f, t), v| (f + v.1, t + v.2));
+                if total > 0 {
+                    readings.push(
+                        Reading::new("space", "Space used", (total - free) as f64 / MIB, Unit::Mebibytes)
+                            .range(0.0, total as f64 / MIB)
+                            .detail(format!("{} free", format_binary(free))),
+                    );
+                }
+
+                let mut subtitle: Vec<String> = drive.and_then(DiskInfo::type_label).into_iter().collect();
                 subtitle.push(format!("Disk {index}"));
                 if !letters.is_empty() {
                     subtitle.push(letters.to_string());
                 }
-                if let Some(size) = info.and_then(|d| d.size) {
+                if let Some(size) = drive.and_then(|d| d.size) {
                     subtitle.push(format_size(size));
                 }
+
+                let mut facts = Vec::new();
+                if let Some(d) = drive {
+                    facts.extend(d.type_label().map(|t| info("Type", t)));
+                    facts.extend(d.size.map(|s| info("Capacity", format_size(s))));
+                    facts.extend(d.firmware.clone().map(|f| info("Firmware", f)));
+                    facts.extend(d.partitions.map(|p| info("Partitions", p.to_string())));
+                }
+                for (letter, free, total) in &volumes {
+                    // Binary units like Explorer, so used + free adds up with "Space used".
+                    facts.push(info(
+                        format!("Volume {letter}"),
+                        format!("{} free of {}", format_binary(*free), format_binary(*total)),
+                    ));
+                }
+                facts.push(info(
+                    "System disk",
+                    if letters.split_whitespace().any(|l| l.eq_ignore_ascii_case(&system_drive)) {
+                        "Yes"
+                    } else {
+                        "No"
+                    },
+                ));
 
                 // Identify the physical drive by serial number, so settings, history and
                 // an open detail page follow it across disk numbers and USB ports.
                 // Without a serial, number + model at least keeps different drives apart.
-                let id = match info {
+                let id = match drive {
                     Some(DiskInfo { serial: Some(serial), .. }) => format!("disk/{serial}"),
                     Some(d) => format!("disk/{index}/{}", d.model),
                     None => format!("disk/{index}"),
                 };
-                let external = info.is_some_and(|d| d.external);
+                let external = drive.is_some_and(|d| d.external);
                 Group {
                     id,
                     kind: if external { Kind::ExternalDisk } else { Kind::Disk },
                     order: order::DISK + rank.min(99) as u16,
                     breakdown: None,
-                    title: info.map(|d| d.model.clone()).unwrap_or_else(|| format!("Disk {index}")),
+                    info: facts,
+                    processes: Some(Processes {
+                        // Windows counts I/O per process, not per drive or device.
+                        metric: "I/O across all drives, network and devices",
+                        unit: Unit::BytesPerSec,
+                        items: top_processes(by_io.iter().cloned(), 8),
+                    }),
+                    title: drive.map(|d| d.model.clone()).unwrap_or_else(|| format!("Disk {index}")),
                     subtitle: subtitle.join(" · "),
                     readings,
                 }
@@ -299,6 +534,7 @@ impl SystemProvider {
 
     fn network_groups(&self) -> Vec<Group> {
         let q = &self.query;
+        let wifi = self.wifi.as_ref().map(Wifi::links).unwrap_or_default();
         let received = by_instance(q, self.net.received);
         let sent = by_instance(q, self.net.sent);
         let bandwidth = by_instance(q, self.net.bandwidth);
@@ -317,30 +553,86 @@ impl SystemProvider {
                 let range = Some((0.0, bits));
                 let down = received.get(name).copied().unwrap_or(0.0) * 8.0;
                 let up = sent.get(name).copied().unwrap_or(0.0) * 8.0;
+                let mut readings = vec![
+                    throughput("down", "Download", down, Unit::BitsPerSec, range),
+                    throughput("up", "Upload", up, Unit::BitsPerSec, range),
+                ];
+
+                let adapter = self.adapters.iter().find(|a| a.matches_pdh(name));
+                let wifi = adapter.and_then(|a| wifi.iter().find(|w| w.description == a.description));
+                let mut facts = Vec::new();
+                if let Some(w) = wifi {
+                    // Signal strength matters as much as throughput on Wi-Fi.
+                    readings.push(
+                        Reading::new("signal", "Signal", w.signal as f64, Unit::Percent)
+                            .range(0.0, 100.0)
+                            .detail(&w.ssid)
+                            .on_dashboard(),
+                    );
+                    facts.push(info("Network", w.ssid.clone()));
+                    facts.extend(w.standard.map(|s| info("Standard", s)));
+                    facts.push(info("Link rate", format!("{:.0} Mbps down · {:.0} Mbps up", w.rx_mbps, w.tx_mbps)));
+                }
+                facts.push(info("Link speed", format_bits(bits)));
+                if let Some(a) = adapter {
+                    facts.push(info("Adapter", a.name.clone()));
+                    facts.extend(a.ipv4.first().map(|ip| info("IPv4", ip.clone())));
+                    facts.extend(a.ipv6.first().map(|ip| info("IPv6", ip.clone())));
+                    facts.extend(a.gateway.clone().map(|g| info("Gateway", g)));
+                    if !a.dns.is_empty() {
+                        facts.push(info("DNS", a.dns.join(", ")));
+                    }
+                    facts.extend(a.mac.clone().map(|m| info("MAC address", m)));
+                }
+
                 Group {
                     id: format!("net/{name}"),
                     kind: Kind::Network,
                     order: order::NETWORK + i as u16,
                     breakdown: None,
+                    info: facts,
+                    processes: None,
                     // PDH escapes "(" and ")" in instance names as "[" and "]".
                     title: name.replace("[R]", "").replace('[', "(").replace(']', ")").replace("  ", " "),
-                    subtitle: format!("Network · {} link", format_bits(bits)),
-                    readings: vec![
-                        throughput("down", "Download", down, Unit::BitsPerSec, range),
-                        throughput("up", "Upload", up, Unit::BitsPerSec, range),
-                    ],
+                    subtitle: match wifi {
+                        Some(w) => format!("Wi-Fi · {}", w.ssid),
+                        None => format!("Network · {} link", format_bits(bits)),
+                    },
+                    readings,
                 }
             })
             .collect()
     }
 }
 
+/// Free and total bytes of a volume such as `"C:"`.
+fn volume_space(letter: &str) -> Option<(u64, u64)> {
+    let (mut free, mut total) = (0u64, 0u64);
+    unsafe { GetDiskFreeSpaceExW(&HSTRING::from(format!("{letter}\\")), None, Some(&mut total), Some(&mut free)) }
+        .ok()?;
+    Some((free, total))
+}
+
+/// E.g. "3 d 4 h 12 min".
+fn uptime() -> String {
+    let minutes = unsafe { GetTickCount64() } / 60_000;
+    let (days, hours, mins) = (minutes / 1440, minutes / 60 % 24, minutes % 60);
+    if days > 0 { format!("{days} d {hours} h {mins} min") } else { format!("{hours} h {mins} min") }
+}
+
 impl SensorProvider for SystemProvider {
     fn poll(&mut self) -> Vec<Group> {
         self.query.collect();
-        let mut groups = vec![self.cpu_group()];
-        groups.extend(self.memory_group());
-        groups.extend(self.disk_groups());
+        let snapshot = self.sampler.sample();
+        if self.polls.is_multiple_of(10) {
+            self.adapters = super::netinfo::adapters();
+        }
+        self.polls = self.polls.wrapping_add(1);
+
+        let mut groups = vec![self.cpu_group(&snapshot)];
+        groups.extend(self.memory_group(&snapshot));
+        groups.extend(self.battery.as_ref().and_then(|b| b.group()));
+        groups.extend(self.disk_groups(&snapshot));
         groups.extend(self.network_groups());
         groups
     }
@@ -357,13 +649,19 @@ fn by_instance(q: &Query, counter: Option<Counter>) -> HashMap<String, f64> {
 }
 
 fn throughput(id: &'static str, label: &'static str, value: f64, unit: Unit, range: Option<(f64, f64)>) -> Reading {
-    Reading { id, label, value: value.max(0.0), unit, range, detail: None, featured: false }
+    Reading { id, label, value: value.max(0.0), unit, range, detail: None, featured: false, dashboard: true }
 }
 
 fn is_virtual_adapter(name: &str) -> bool {
     const SKIP: [&str; 8] =
         ["vEthernet", "Hyper-V", "Virtual", "Loopback", "isatap", "Teredo", "WAN Miniport", "Bluetooth"];
     SKIP.iter().any(|s| name.to_lowercase().contains(&s.to_lowercase()))
+}
+
+/// Sizes as Windows Explorer shows them (1 GB = 1024³ bytes).
+fn format_binary(bytes: u64) -> String {
+    let gb = bytes as f64 / (1u64 << 30) as f64;
+    if gb >= 1024.0 { format!("{:.2} TB", gb / 1024.0) } else { format!("{gb:.0} GB") }
 }
 
 fn format_size(bytes: u64) -> String {
@@ -382,8 +680,15 @@ fn format_bits(bits: f64) -> String {
 struct Inventory {
     cpu_name: Option<String>,
     cpu_topology: Option<String>,
+    logical_processors: u32,
+    /// Base speed, sockets, caches, virtualization.
+    cpu_info: Vec<Info>,
     memory_name: Option<String>,
     memory_modules: Option<String>,
+    /// Speed, slots, form factor, one line per module.
+    memory_info: Vec<Info>,
+    /// RAM installed, including what firmware and devices reserve.
+    installed_kb: Option<u64>,
     board: Option<String>,
     disks: HashMap<u32, DiskInfo>,
 }
@@ -395,6 +700,8 @@ struct DiskInfo {
     external: bool,
     bus: Option<&'static str>,
     media: Option<&'static str>,
+    firmware: Option<String>,
+    partitions: Option<u32>,
 }
 
 impl DiskInfo {
@@ -419,6 +726,15 @@ struct Win32Processor {
     name: String,
     number_of_cores: u32,
     number_of_logical_processors: u32,
+    max_clock_speed: Option<u32>,
+    virtualization_firmware_enabled: Option<bool>,
+    socket_designation: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename = "Win32_PhysicalMemoryArray", rename_all = "PascalCase")]
+struct Win32PhysicalMemoryArray {
+    memory_devices: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -437,6 +753,10 @@ struct Win32PhysicalMemory {
     configured_clock_speed: Option<u32>,
     #[serde(rename = "SMBIOSMemoryType")]
     smbios_memory_type: Option<u32>,
+    speed: Option<u32>,
+    form_factor: Option<u16>,
+    bank_label: Option<String>,
+    device_locator: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -450,6 +770,8 @@ struct Win32DiskDrive {
     media_type: Option<String>,
     #[serde(rename = "PNPDeviceID")]
     pnp_device_id: Option<String>,
+    firmware_revision: Option<String>,
+    partitions: Option<u32>,
 }
 
 impl Inventory {
@@ -458,10 +780,28 @@ impl Inventory {
         let mut inv = Inventory::default();
         let Ok(wmi) = wmi::WMIConnection::new() else { return inv };
 
-        if let Some(cpu) = wmi.query::<Win32Processor>().ok().and_then(|v| v.into_iter().next()) {
+        if let Ok(cpus) = wmi.query::<Win32Processor>()
+            && let Some(cpu) = cpus.first()
+        {
             inv.cpu_name = Some(cpu.name.trim().to_string());
             inv.cpu_topology =
                 Some(format!("{} cores · {} threads", cpu.number_of_cores, cpu.number_of_logical_processors));
+            inv.logical_processors = cpus.iter().map(|c| c.number_of_logical_processors).sum();
+
+            let facts = &mut inv.cpu_info;
+            if let Some(mhz) = cpu.max_clock_speed {
+                facts.push(info("Base speed", format!("{:.2} GHz", mhz as f64 / 1000.0)));
+            }
+            facts.push(info("Sockets", cpus.len().to_string()));
+            facts.extend(cpu.socket_designation.as_deref().map(|s| info("Socket", s.trim())));
+            facts.push(info("Cores", cpus.iter().map(|c| c.number_of_cores).sum::<u32>().to_string()));
+            facts.push(info("Logical processors", inv.logical_processors.to_string()));
+            for (level, bytes) in cache_sizes() {
+                facts.push(info(format!("L{level} cache"), format_cache(bytes)));
+            }
+            if let Some(on) = cpu.virtualization_firmware_enabled {
+                facts.push(info("Virtualization", if on { "Enabled" } else { "Disabled" }));
+            }
         }
 
         if let Some(board) = wmi.query::<Win32BaseBoard>().ok().and_then(|v| v.into_iter().next()) {
@@ -495,11 +835,100 @@ impl Inventory {
             let parts: Vec<&str> =
                 [vendor, part, per_module.as_deref().unwrap_or("")].into_iter().filter(|s| !s.is_empty()).collect();
             inv.memory_modules = Some(parts.join(" · "));
+
+            let facts = &mut inv.memory_info;
+            if let Some(mts) = first.configured_clock_speed.filter(|s| *s > 0) {
+                facts.push(info(
+                    "Speed",
+                    match first.speed {
+                        // E.g. XMP/EXPO profiles run above the module's JEDEC speed.
+                        Some(rated) if rated > 0 && rated != mts => format!("{mts} MT/s (JEDEC {rated} MT/s)"),
+                        _ => format!("{mts} MT/s"),
+                    },
+                ));
+            }
+            let slots: Option<u32> =
+                wmi.query::<Win32PhysicalMemoryArray>().ok().and_then(|a| a.iter().map(|a| a.memory_devices).sum());
+            facts.push(info(
+                "Slots used",
+                match slots {
+                    Some(slots) if slots > 0 => format!("{} of {slots}", modules.len()),
+                    _ => modules.len().to_string(),
+                },
+            ));
+            let form = match first.form_factor {
+                Some(8) => Some("DIMM"),
+                Some(12) => Some("SO-DIMM"),
+                _ => None,
+            };
+            facts.extend(form.map(|f| info("Form factor", f)));
+            for m in &modules {
+                let slot = module_slot(m.bank_label.as_deref(), m.device_locator.as_deref());
+                let size = m.capacity.map(|c| format!("{} GB", c >> 30));
+                let part = m.part_number.as_deref().map(str::trim).filter(|p| !p.is_empty());
+                let value: Vec<&str> = [size.as_deref(), part].into_iter().flatten().collect();
+                facts.push(info(slot, value.join(" · ")));
+            }
         }
 
+        let mut installed_kb = 0u64;
+        inv.installed_kb =
+            unsafe { GetPhysicallyInstalledSystemMemory(&mut installed_kb) }.is_ok().then_some(installed_kb);
         inv.disks = load_disks(&wmi);
         inv
     }
+}
+
+/// Readable slot name: "Channel A · DIMM 1" from bank "P0 CHANNEL A" and locator
+/// "DIMM 1", or whichever of the two is present.
+fn module_slot(bank: Option<&str>, locator: Option<&str>) -> String {
+    let channel = bank.and_then(|b| {
+        let upper = b.to_uppercase();
+        let i = upper.find("CHANNEL")?;
+        Some(format!("Channel {}", b[i + 7..].trim()))
+    });
+    [channel.as_deref(), locator.map(str::trim)]
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// Total cache size per level (1–3), summed over all cores like Task Manager.
+fn cache_sizes() -> Vec<(u8, u64)> {
+    let mut size = 0u32;
+    unsafe { GetLogicalProcessorInformationEx(RelationCache, None, &mut size) }.ok();
+    if size == 0 {
+        return Vec::new();
+    }
+    let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
+    let ptr = buffer.as_mut_ptr() as *mut SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX;
+    if unsafe { GetLogicalProcessorInformationEx(RelationCache, Some(ptr), &mut size) }.is_err() {
+        return Vec::new();
+    }
+    let mut totals = [0u64; 4];
+    let mut offset = 0usize;
+    while offset < size as usize {
+        // SAFETY: variable-sized records packed back to back; `Size` gives the stride.
+        let record =
+            unsafe { &*((buffer.as_ptr() as *const u8).add(offset) as *const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX) };
+        if record.Relationship == RelationCache {
+            let cache: &CACHE_RELATIONSHIP = unsafe { &record.Anonymous.Cache };
+            if (1..=3).contains(&cache.Level) {
+                totals[cache.Level as usize] += cache.CacheSize as u64;
+            }
+        }
+        if record.Size == 0 {
+            break;
+        }
+        offset += record.Size as usize;
+    }
+    (1..=3u8).filter(|l| totals[*l as usize] > 0).map(|l| (l, totals[l as usize])).collect()
+}
+
+fn format_cache(bytes: u64) -> String {
+    if bytes >= 1 << 20 { format!("{} MB", bytes >> 20) } else { format!("{} KB", bytes >> 10) }
 }
 
 fn load_disks(wmi: &wmi::WMIConnection) -> HashMap<u32, DiskInfo> {
@@ -517,7 +946,11 @@ fn load_disks(wmi: &wmi::WMIConnection) -> HashMap<u32, DiskInfo> {
             // Serials come padded ("    WW60QK2F") or with a trailing dot (NVMe EUI).
             let serial = d.serial_number.map(|s| s.trim().trim_end_matches('.').to_string()).filter(|s| !s.is_empty());
             let (bus, media) = types.remove(&d.index).unwrap_or_default();
-            (d.index, DiskInfo { model, size: d.size, serial, external, bus, media })
+            let firmware = d.firmware_revision.map(|f| f.trim().to_string()).filter(|f| !f.is_empty());
+            (
+                d.index,
+                DiskInfo { model, size: d.size, serial, external, bus, media, firmware, partitions: d.partitions },
+            )
         })
         .collect()
 }

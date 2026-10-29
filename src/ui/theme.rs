@@ -34,6 +34,8 @@ pub fn accent(unit: Unit, value: f64) -> Color32 {
         Unit::Mebibytes => Color32::from_rgb(0xC0, 0x84, 0xFC),
         Unit::BytesPerSec => Color32::from_rgb(0x5C, 0xC8, 0xFF),
         Unit::BitsPerSec => Color32::from_rgb(0xF4, 0x72, 0xB6),
+        Unit::Milliseconds => Color32::from_rgb(0xFF, 0x9F, 0x6B),
+        Unit::PerSecond | Unit::Count => Color32::from_rgb(0x94, 0xA3, 0xB8),
     }
 }
 
@@ -45,6 +47,7 @@ pub fn kind_color(kind: Kind) -> Color32 {
         Kind::Disk => Color32::from_rgb(0x5C, 0xC8, 0xFF),
         Kind::ExternalDisk => Color32::from_rgb(0x38, 0xBD, 0xC8),
         Kind::Network => Color32::from_rgb(0xF4, 0x72, 0xB6),
+        Kind::Battery => Color32::from_rgb(0xA3, 0xE6, 0x35),
     }
 }
 

@@ -376,6 +376,13 @@ fn display(v: f64, unit: Unit) -> (String, &'static str) {
         Unit::BitsPerSec if v >= 1e9 => (format!("{:.2}", v / 1e9), "Gbps"),
         Unit::BitsPerSec if v >= 1e6 => (format!("{:.1}", v / 1e6), "Mbps"),
         Unit::BitsPerSec => (format!("{:.0}", v / 1e3), "Kbps"),
+        Unit::Milliseconds if v < 10.0 => (format!("{v:.1}"), "ms"),
+        Unit::Milliseconds => (format!("{v:.0}"), "ms"),
+        Unit::PerSecond if v >= 1e6 => (format!("{:.1}", v / 1e6), "M/s"),
+        Unit::PerSecond if v >= 1e4 => (format!("{:.0}", v / 1e3), "k/s"),
+        Unit::PerSecond => (format!("{v:.0}"), "/s"),
+        Unit::Count if v.fract() != 0.0 && v < 10.0 => (format!("{v:.1}"), ""),
+        Unit::Count => (format!("{v:.0}"), ""),
     }
 }
 
