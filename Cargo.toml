@@ -14,3 +14,7 @@ wmi = "0.18.4"
 [build-dependencies]
 winresource = "0.1.34"
 
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
