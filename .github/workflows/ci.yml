@@ -1,9 +1,12 @@
-# Formatting, lints and tests. Runs on pull requests and by hand; Windows minutes
-# count twice against the private repo's allowance, so not on every push.
-# To run it on pushes too, add:  push: { branches: [master], paths: ['src/**', 'Cargo.*', 'build.rs'] }
+# Formatting, lints and tests on pushes to the default branch, pull requests and by
+# hand. Windows minutes count twice against the private repo's allowance, so
+# pushes that only touch docs are skipped.
 name: CI
 
 on:
+  push:
+    branches: [master]
+    paths-ignore: ['**.md']
   pull_request:
   workflow_dispatch:
 
