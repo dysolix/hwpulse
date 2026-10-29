@@ -1,7 +1,10 @@
-//! Task Manager style "Performance" page: every component in a list on the left,
-//! the selected one with a large history chart and its values on the right.
+//! Components page: every component in a list. Clicking one opens it next to the
+//! list, Task Manager style: a large history chart, all values, smaller charts, top
+//! processes and details. Clicking it again (or Esc) closes it.
 
-use eframe::egui::{self, Align2, CornerRadius, CursorIcon, Key, Rect, ScrollArea, Sense, Stroke, Ui, pos2, vec2};
+use eframe::egui::{
+    self, Align2, CornerRadius, CursorIcon, Key, PointerButton, Rect, ScrollArea, Sense, Stroke, Ui, pos2, vec2,
+};
 
 use super::{grid_columns, theme, widgets};
 use crate::poller::Model;
@@ -10,66 +13,117 @@ use crate::settings::Settings;
 
 #[derive(Default)]
 pub struct State {
-    /// [`Group::id`] of the selected component; the first one when unset or gone.
+    /// [`Group::id`] of the opened component; `None` shows only the list.
     selected: Option<String>,
     /// Components with a breakdown (the CPU): one chart per item instead of the total.
     breakdown: bool,
 }
 
+impl State {
+    /// Opens a component, e.g. when its name is clicked on the dashboard.
+    pub fn open(&mut self, id: String) {
+        self.selected = Some(id);
+    }
+}
+
 const ROW_HEIGHT: f32 = 66.0;
+const WIDE_ROW_HEIGHT: f32 = 78.0;
 const GAP: f32 = 12.0;
 
 pub fn page(ui: &mut Ui, model: &Model, settings: &Settings, state: &mut State) {
     let groups = settings.ordered(&model.groups);
     if groups.is_empty() {
-        ui.label(egui::RichText::new("Waiting for sensors…").color(theme::TEXT_DIM));
+        widgets::waiting(ui);
         return;
     }
 
-    let mut index = state.selected.as_ref().and_then(|id| groups.iter().position(|g| &g.id == id)).unwrap_or(0);
-    let (up, down) = ui.input(|i| (i.key_pressed(Key::ArrowUp), i.key_pressed(Key::ArrowDown)));
-    if up {
-        index = index.saturating_sub(1);
+    // A component that stopped reporting (unplugged drive) closes its details.
+    let mut index = state.selected.as_ref().and_then(|id| groups.iter().position(|g| &g.id == id));
+    let (up, down, back) = ui.input(|i| {
+        (
+            i.key_pressed(Key::ArrowUp),
+            i.key_pressed(Key::ArrowDown),
+            i.key_pressed(Key::Escape) || i.pointer.button_pressed(PointerButton::Extra1),
+        )
+    });
+    if let Some(i) = index.as_mut() {
+        if up {
+            *i = i.saturating_sub(1);
+        }
+        if down {
+            *i = (*i + 1).min(groups.len() - 1);
+        }
     }
-    if down {
-        index = (index + 1).min(groups.len() - 1);
+    if back {
+        index = None;
     }
 
     let full = ui.available_rect_before_wrap();
-    let side_width = (full.width() * 0.27).clamp(180.0, 280.0);
-    let side = Rect::from_min_max(full.min, pos2(full.left() + side_width, full.bottom()));
-    let main = Rect::from_min_max(pos2(side.right() + 25.0, full.top()), full.max);
-    ui.painter().vline(side.right() + 12.0, full.y_range(), Stroke::new(1.0, theme::BORDER));
+    let open = index.is_some();
+    let side = if open {
+        let width = (full.width() * 0.27).clamp(180.0, 280.0);
+        ui.painter().vline(full.left() + width + 12.0, full.y_range(), Stroke::new(1.0, theme::BORDER));
+        Rect::from_min_max(full.min, pos2(full.left() + width, full.bottom()))
+    } else {
+        full
+    };
 
     ui.scope_builder(egui::UiBuilder::new().max_rect(side), |ui| {
-        ScrollArea::vertical().id_salt("performance_list").auto_shrink(false).show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 4.0;
+        ScrollArea::vertical().id_salt("components_list").auto_shrink(false).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = if open { 4.0 } else { 8.0 };
+            if !open {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} components · select one for live charts, top processes and details",
+                        groups.len()
+                    ))
+                    .font(theme::regular(12.5))
+                    .color(theme::TEXT_FAINT),
+                );
+                ui.add_space(2.0);
+            }
             for (i, group) in groups.iter().enumerate() {
-                if list_row(ui, group, model, i == index).clicked() {
-                    index = i;
+                let selected = index == Some(i);
+                if list_row(ui, group, model, selected, !open).clicked() {
+                    index = if selected { None } else { Some(i) };
                 }
             }
         });
     });
 
-    let group = groups[index];
-    state.selected = Some(group.id.clone());
-    ui.scope_builder(egui::UiBuilder::new().max_rect(main), |ui| {
-        ScrollArea::vertical().id_salt(("performance", &group.id)).auto_shrink(false).show(ui, |ui| {
-            details(ui, group, model, state, main.height());
+    state.selected = index.map(|i| groups[i].id.clone());
+    if let Some(i) = index {
+        let group = groups[i];
+        let main = Rect::from_min_max(pos2(side.right() + 25.0, full.top()), full.max);
+        ui.scope_builder(egui::UiBuilder::new().max_rect(main), |ui| {
+            ScrollArea::vertical().id_salt(("components", &group.id)).auto_shrink(false).show(ui, |ui| {
+                details(ui, group, model, state, main.height());
+            });
         });
-    });
+    }
     ui.allocate_rect(full, Sense::hover());
 }
 
-/// Entry in the component list: thumbnail of the main chart, name, type, key values.
-fn list_row(ui: &mut Ui, group: &Group, model: &Model, selected: bool) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
+/// Entry in the component list: thumbnail of the main chart, name, type and key
+/// values. `wide` when the list has the page to itself: a bigger thumbnail and the
+/// key values in columns on the right instead of one summary line.
+fn list_row(ui: &mut Ui, group: &Group, model: &Model, selected: bool, wide: bool) -> egui::Response {
+    let height = if wide { WIDE_ROW_HEIGHT } else { ROW_HEIGHT };
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
     let response = response.on_hover_cursor(CursorIcon::PointingHand);
+    let hovered = response.hovered();
     let painter = ui.painter_at(rect);
     let color = theme::kind_color(group.kind);
 
-    if selected || response.hovered() {
+    if wide {
+        painter.rect(
+            rect,
+            CornerRadius::same(theme::CARD_RADIUS),
+            if hovered { theme::RAISED } else { theme::SURFACE },
+            Stroke::new(1.0, if hovered { theme::BORDER_HOVER } else { theme::BORDER }),
+            egui::StrokeKind::Inside,
+        );
+    } else if selected || hovered {
         painter.rect_filled(rect, CornerRadius::same(10), if selected { theme::RAISED } else { theme::SURFACE });
     }
     if selected {
@@ -78,18 +132,71 @@ fn list_row(ui: &mut Ui, group: &Group, model: &Model, selected: bool) -> egui::
     }
 
     let (main, _) = charts(group);
-    let thumb = Rect::from_min_size(pos2(rect.left() + 12.0, rect.center().y - 21.0), vec2(62.0, 42.0));
+    let thumb_size = if wide { vec2(96.0, 50.0) } else { vec2(62.0, 42.0) };
+    let thumb = Rect::from_min_size(pos2(rect.left() + 14.0, rect.center().y - thumb_size.y / 2.0), thumb_size);
     widgets::thumbnail(&painter, thumb, &series(group, model, &main.readings), range(&main.readings), color);
+    let x = thumb.right() + if wide { 16.0 } else { 12.0 };
 
-    let x = thumb.right() + 12.0;
-    let width = rect.right() - 8.0 - x;
+    if !wide {
+        let width = rect.right() - 8.0 - x;
+        let lines = [
+            (group.title.as_str(), theme::semibold(13.5), theme::TEXT, 9.0),
+            (group.subtitle.as_str(), theme::regular(11.5), theme::TEXT_FAINT, 29.0),
+            (&summary(group), theme::regular(11.5), theme::TEXT_DIM, 45.0),
+        ];
+        for (text, font, color, y) in lines {
+            painter.galley(pos2(x, rect.top() + y), widgets::elided(&painter, text, font, color, width), color);
+        }
+        return response;
+    }
+
+    // Chevron on the right, nudged forward on hover, so the card reads as a button.
+    let nudge = ui.ctx().animate_bool_with_time(response.id.with("hover"), hovered, 0.12) * 4.0;
+    painter.text(
+        pos2(rect.right() - 20.0 + nudge, rect.center().y),
+        Align2::RIGHT_CENTER,
+        "›",
+        theme::regular(24.0),
+        if hovered { theme::TEXT } else { theme::TEXT_FAINT },
+    );
+
+    // Kind, name and type on the left; key values right-aligned in columns, dropped
+    // from the left when the window is too narrow for them next to the name.
+    const COLUMN: f32 = 112.0;
+    let key: Vec<&Reading> = group.readings.iter().filter(|r| r.dashboard).take(3).collect();
+    let mut right = rect.right() - 48.0;
+    let mut columns_left = right;
+    let title_width = painter.layout_no_wrap(group.title.clone(), theme::semibold(15.0), theme::TEXT).size().x;
+    for r in key.iter().rev() {
+        if right - COLUMN < x + title_width.min(260.0) + 24.0 {
+            break;
+        }
+        painter.text(
+            pos2(right, rect.top() + 26.0),
+            Align2::RIGHT_CENTER,
+            r.label.to_uppercase(),
+            theme::semibold(10.0),
+            theme::TEXT_FAINT,
+        );
+        widgets::value_text(
+            &painter,
+            pos2(right, rect.top() + 49.0),
+            (r.value, r.unit),
+            18.0,
+            11.0,
+            Align2::RIGHT_CENTER,
+        );
+        columns_left = right - COLUMN;
+        right = columns_left;
+    }
+    let width = columns_left - 16.0 - x;
     let lines = [
-        (group.title.as_str(), theme::semibold(13.5), theme::TEXT, 9.0),
-        (group.subtitle.as_str(), theme::regular(11.5), theme::TEXT_FAINT, 29.0),
-        (&summary(group), theme::regular(11.5), theme::TEXT_DIM, 45.0),
+        (group.kind.label().to_uppercase(), theme::semibold(10.5), color, 14.0),
+        (group.title.clone(), theme::semibold(15.0), theme::TEXT, 30.0),
+        (group.subtitle.clone(), theme::regular(12.0), theme::TEXT_FAINT, 51.0),
     ];
     for (text, font, color, y) in lines {
-        painter.galley(pos2(x, rect.top() + y), widgets::elided(&painter, text, font, color, width), color);
+        painter.galley(pos2(x, rect.top() + y), widgets::elided(&painter, &text, font, color, width), color);
     }
     response
 }
@@ -127,6 +234,8 @@ fn details(ui: &mut Ui, group: &Group, model: &Model, state: &mut State, view_he
 
     match breakdown.filter(|_| state.breakdown) {
         Some(b) => {
+            ui.label(egui::RichText::new(b.subtitle).font(theme::regular(12.0)).color(theme::TEXT_FAINT));
+            ui.add_space(2.0);
             let per_row = grid_columns(ui.available_width(), b.items.len());
             let rows = b.items.len().div_ceil(per_row);
             let cell = ((chart_height - GAP * (rows - 1) as f32) / rows as f32).max(96.0);
@@ -141,23 +250,19 @@ fn details(ui: &mut Ui, group: &Group, model: &Model, state: &mut State, view_he
                             unit: b.unit,
                             dashed: false,
                         };
-                        widgets::chart(col, cell, &item.label, &[s], b.range, color, true);
+                        widgets::chart(col, cell, &item.label, item.detail.as_deref(), &[s], b.range, color, true);
                     }
                 });
             }
         }
         None => {
             let s = series(group, model, &main.readings);
-            widgets::chart(ui, chart_height, main.title, &s, range(&main.readings), color, false);
+            widgets::chart(ui, chart_height, main.title, None, &s, range(&main.readings), color, false);
         }
     }
 
     ui.add_space(6.0);
     values(ui, group);
-    if !group.info.is_empty() {
-        ui.add_space(4.0);
-        super::details_card(ui, &group.info);
-    }
     ui.add_space(10.0);
 
     let per_row = if ui.available_width() >= 900.0 { 3 } else { 2 };
@@ -165,9 +270,20 @@ fn details(ui: &mut Ui, group: &Group, model: &Model, state: &mut State, view_he
         ui.columns(per_row, |cols| {
             for (col, chart) in cols.iter_mut().zip(row) {
                 let s = series(group, model, &chart.readings);
-                widgets::chart(col, 150.0, chart.title, &s, range(&chart.readings), color, true);
+                widgets::chart(col, 150.0, chart.title, None, &s, range(&chart.readings), color, true);
             }
         });
+    }
+
+    if let Some(processes) = group.processes.as_ref() {
+        ui.add_space(14.0);
+        super::subsection(ui, "Top processes", &format!("By {}, refreshed every second", processes.metric));
+        super::processes_card(ui, processes, color);
+    }
+    if !group.info.is_empty() {
+        ui.add_space(14.0);
+        super::subsection(ui, "Details", "");
+        super::details_card(ui, &group.info);
     }
     ui.add_space(14.0);
 }

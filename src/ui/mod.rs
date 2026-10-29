@@ -1,11 +1,10 @@
-mod performance;
+mod components;
 pub mod theme;
 pub mod widgets;
 pub mod window;
 
 use eframe::egui::{
-    self, Align2, CentralPanel, CornerRadius, CursorIcon, Frame, Key, Margin, PointerButton, Rect, Response,
-    ScrollArea, Sense, Ui, vec2,
+    self, Align2, CentralPanel, CornerRadius, CursorIcon, Frame, Margin, Rect, Response, ScrollArea, Sense, Ui, vec2,
 };
 
 use crate::autostart;
@@ -16,9 +15,8 @@ use crate::settings::{self, Settings};
 #[derive(Clone, Debug, PartialEq)]
 enum Page {
     Dashboard,
-    Performance,
     Components,
-    /// Detail view of one group, by [`Group::id`].
+    /// Only a navigation request: the Components page with this [`Group::id`] opened.
     Component(String),
     Settings,
 }
@@ -27,7 +25,7 @@ pub struct App {
     model: Shared,
     page: Page,
     settings: Settings,
-    performance: performance::State,
+    components: components::State,
     /// Whether this copy starts with Windows; checked (and repaired) at startup.
     autostart: autostart::State,
 }
@@ -41,7 +39,7 @@ impl App {
             model: poller::spawn(cc.egui_ctx.clone()),
             page: Page::Dashboard,
             settings,
-            performance: Default::default(),
+            components: Default::default(),
             autostart: autostart::check(),
         }
     }
@@ -63,21 +61,21 @@ impl eframe::App for App {
         widgets::set_timeline(ui.ctx(), model.updated.filter(|_| slide).map(|t| t.elapsed()));
         let page = &self.page;
         let settings = &mut self.settings;
-        let performance = &mut self.performance;
+        let components = &mut self.components;
         let autostart = &mut self.autostart;
         // Navigation requested during this frame; applied after drawing.
         let mut nav: Option<Page> = None;
 
-        let back = ui.input(|i| i.key_pressed(Key::Escape) || i.pointer.button_pressed(PointerButton::Extra1));
-        if back && matches!(page, Page::Component(_)) {
-            nav = Some(Page::Components);
-        }
-
         CentralPanel::default().frame(Frame::new().fill(theme::BG).inner_margin(Margin::same(22))).show(ui, |ui| {
             header(ui, &model, page, &mut nav);
-            if *page == Page::Performance {
-                // Two independently scrolling panes instead of one page scroll.
-                performance::page(ui, &model, settings, performance);
+            // Settings work without data; everything else waits for the first samples.
+            if model.groups.is_empty() && model.errors.is_empty() && *page != Page::Settings {
+                widgets::waiting(ui);
+                return;
+            }
+            if *page == Page::Components {
+                // The list and the details scroll on their own instead of one page scroll.
+                components::page(ui, &model, settings, components);
                 return;
             }
             let viewport_height = ui.available_height();
@@ -86,25 +84,26 @@ impl eframe::App for App {
                 for error in &model.errors {
                     ui.label(egui::RichText::new(error).color(theme::ERROR).font(theme::regular(13.0)));
                 }
-                if model.groups.is_empty() && model.errors.is_empty() {
-                    ui.label(egui::RichText::new("Waiting for sensors…").color(theme::TEXT_DIM));
-                }
                 match page {
                     Page::Dashboard => {
                         dashboard(ui, &model, settings, &mut nav);
                         footer(ui, viewport_height - (ui.cursor().top() - content_top));
                     }
-                    Page::Components => components(ui, &model, &mut nav),
-                    Page::Component(id) => detail(ui, &model, id, &mut nav),
                     Page::Settings => settings_page(ui, &model, settings, autostart),
-                    Page::Performance => {}
+                    Page::Components | Page::Component(_) => {}
                 }
             });
         });
 
         drop(model);
         if let Some(next) = nav {
-            self.page = next;
+            self.page = match next {
+                Page::Component(id) => {
+                    self.components.open(id);
+                    Page::Components
+                }
+                page => page,
+            };
             ui.ctx().request_repaint();
         }
     }
@@ -142,12 +141,7 @@ fn header(ui: &mut Ui, model: &Model, page: &Page, nav: &mut Option<Page>) {
 
     // Segmented page switcher: left of the pill when everything fits in one row,
     // otherwise on its own row below the title so nothing overlaps.
-    let tabs = [
-        ("Dashboard", Page::Dashboard),
-        ("Performance", Page::Performance),
-        ("Components", Page::Components),
-        ("Settings", Page::Settings),
-    ];
+    let tabs = [("Dashboard", Page::Dashboard), ("Components", Page::Components), ("Settings", Page::Settings)];
     let font = theme::semibold(12.5);
     let widths: Vec<f32> =
         tabs.iter().map(|(t, _)| p.layout_no_wrap(t.to_string(), font.clone(), theme::TEXT).size().x + 28.0).collect();
@@ -170,10 +164,7 @@ fn header(ui: &mut Ui, model: &Model, page: &Page, nav: &mut Option<Page>) {
         x += w;
         let response =
             ui.interact(tab, ui.scope_id().with(title), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
-        let active = match (&target, page) {
-            (Page::Components, Page::Component(_)) => true,
-            (a, b) => a == b,
-        };
+        let active = &target == page;
         if active {
             p.rect_filled(tab, CornerRadius::same(12), theme::RAISED);
         }
@@ -442,7 +433,7 @@ fn section_height(group: &Group) -> f32 {
 }
 
 /// One dashboard section. The header doubles as drag handle (`drag_id`) for
-/// reordering; the title itself is a link to the component's detail page.
+/// reordering; the title itself opens the component on the Components page.
 fn group_section(ui: &mut Ui, group: &Group, model: &Model, nav: &mut Option<Page>, stretch: f32, drag_id: egui::Id) {
     // Fixed-height header so `section_height` stays exact.
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), SECTION_HEADER), Sense::hover());
@@ -506,28 +497,6 @@ fn cards(ui: &mut Ui, group: &Group, model: &Model, stretch: f32) {
                 });
             }
         });
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Components list
-
-fn components(ui: &mut Ui, model: &Model, nav: &mut Option<Page>) {
-    ui.add_space(4.0);
-    ui.label(egui::RichText::new("Components").font(theme::semibold(18.0)).color(theme::TEXT));
-    ui.add_space(-8.0);
-    ui.label(
-        egui::RichText::new(format!("{} detected · select one for details", model.groups.len()))
-            .font(theme::regular(12.0))
-            .color(theme::TEXT_FAINT),
-    );
-    ui.add_space(6.0);
-
-    ui.spacing_mut().item_spacing.y = 10.0;
-    for group in &model.groups {
-        if widgets::component_row(ui, group).clicked() {
-            *nav = Some(Page::Component(group.id.clone()));
-        }
     }
 }
 
@@ -890,64 +859,7 @@ fn settings_card(ui: &mut Ui, group: &Group, settings: &mut Settings, handle_id:
 }
 
 // ---------------------------------------------------------------------------
-// Component detail
-
-fn detail(ui: &mut Ui, model: &Model, id: &str, nav: &mut Option<Page>) {
-    if link(ui, "‹  All components", theme::regular(13.0), theme::TEXT_DIM, false).clicked() {
-        *nav = Some(Page::Components);
-    }
-    ui.add_space(2.0);
-
-    let Some(group) = model.groups.iter().find(|g| g.id == id) else {
-        ui.label(egui::RichText::new("This component is not reporting right now.").color(theme::TEXT_DIM));
-        return;
-    };
-
-    ui.label(
-        egui::RichText::new(group.kind.label().to_uppercase())
-            .font(theme::semibold(11.0))
-            .color(theme::kind_color(group.kind)),
-    );
-    ui.add_space(-8.0);
-    ui.label(egui::RichText::new(&group.title).font(theme::semibold(24.0)).color(theme::TEXT));
-    ui.add_space(-8.0);
-    ui.label(egui::RichText::new(&group.subtitle).font(theme::regular(13.0)).color(theme::TEXT_FAINT));
-    ui.add_space(8.0);
-
-    cards(ui, group, model, 0.0);
-
-    if let Some(breakdown) = &group.breakdown {
-        ui.add_space(14.0);
-        ui.label(egui::RichText::new(breakdown.title).font(theme::semibold(16.0)).color(theme::TEXT));
-        ui.add_space(-8.0);
-        ui.label(egui::RichText::new(breakdown.subtitle).font(theme::regular(12.0)).color(theme::TEXT_FAINT));
-        ui.add_space(4.0);
-
-        let per_row = grid_columns(ui.available_width(), breakdown.items.len());
-        for row in breakdown.items.chunks(per_row) {
-            ui.columns(per_row, |cols| {
-                for (col, item) in cols.iter_mut().zip(row) {
-                    let history = model.history.get(&format!("{}/#{}", group.id, item.label));
-                    col.push_id((&group.id, &item.label), |ui| {
-                        widgets::breakdown_cell(ui, item, breakdown.unit, breakdown.range, history)
-                    });
-                }
-            });
-        }
-    }
-
-    if let Some(processes) = group.processes.as_ref() {
-        ui.add_space(14.0);
-        subsection(ui, "Top processes", &format!("By {}, refreshed every second", processes.metric));
-        processes_card(ui, processes, theme::kind_color(group.kind));
-    }
-    if !group.info.is_empty() {
-        ui.add_space(14.0);
-        subsection(ui, "Details", "");
-        details_card(ui, &group.info);
-    }
-    ui.add_space(14.0);
-}
+// Cards shared by the Components page
 
 fn subsection(ui: &mut Ui, title: &str, subtitle: &str) {
     ui.label(egui::RichText::new(title).font(theme::semibold(16.0)).color(theme::TEXT));

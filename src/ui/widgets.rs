@@ -10,7 +10,7 @@ use eframe::egui::{
 
 use super::theme;
 use crate::poller::HISTORY_LEN;
-use crate::sensors::{BreakdownItem, Group, Reading, Unit};
+use crate::sensors::{Reading, Unit};
 
 pub const FEATURED_HEIGHT: f32 = 252.0;
 pub const STAT_HEIGHT: f32 = 128.0;
@@ -115,119 +115,6 @@ pub fn stat_card(ui: &mut Ui, reading: &Reading, history: Option<&VecDeque<f32>>
     }
 }
 
-pub const CELL_HEIGHT: f32 = 100.0;
-
-/// Small tile for one breakdown item (e.g. a CPU thread): value, detail, sparkline.
-pub fn breakdown_cell(
-    ui: &mut Ui,
-    item: &BreakdownItem,
-    unit: Unit,
-    range: Option<(f64, f64)>,
-    history: Option<&VecDeque<f32>>,
-) {
-    let rect = card(ui, CELL_HEIGHT);
-    let painter = ui.painter_at(rect);
-    let color = theme::accent(unit, item.value);
-    let inner = rect.shrink2(vec2(14.0, 12.0));
-
-    painter.text(inner.left_top(), Align2::LEFT_TOP, item.label.to_uppercase(), theme::semibold(10.5), theme::TEXT_DIM);
-    value_text(&painter, inner.left_top() + vec2(0.0, 17.0), (item.value, unit), 19.0, 11.0, Align2::LEFT_TOP);
-    if let Some(detail) = &item.detail {
-        painter.text(inner.right_top(), Align2::RIGHT_TOP, detail, theme::regular(11.0), theme::TEXT_FAINT);
-    }
-
-    if let Some(h) = history {
-        let spark = Rect::from_min_max(pos2(inner.left(), inner.bottom() - 30.0), inner.right_bottom());
-        sparkline(ui, &item.label, spark, h, range, color);
-    }
-    // Load fill along the bottom edge doubles as a bar.
-    if let Some(frac) = fraction_of(item.value, range).filter(|f| *f > 0.0) {
-        let bar = Rect::from_min_max(
-            pos2(rect.left() + 1.0, rect.bottom() - 3.0),
-            pos2(rect.left() + 1.0 + (rect.width() - 2.0) * frac, rect.bottom() - 1.0),
-        );
-        painter.rect_filled(bar, CornerRadius { sw: theme::CARD_RADIUS, ..Default::default() }, color);
-    }
-}
-
-pub const ROW_HEIGHT: f32 = 78.0;
-
-/// Clickable list row for the components page: kind, name, up to three key values.
-pub fn component_row(ui: &mut Ui, group: &Group) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
-    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-    let hovered = response.hovered();
-    let painter = ui.painter_at(rect);
-    painter.rect(
-        rect,
-        CornerRadius::same(theme::CARD_RADIUS),
-        if hovered { theme::RAISED } else { theme::SURFACE },
-        Stroke::new(1.0, if hovered { theme::BORDER_HOVER } else { theme::BORDER }),
-        StrokeKind::Inside,
-    );
-
-    let inner = rect.shrink2(vec2(20.0, 0.0));
-    let kind_color = theme::kind_color(group.kind);
-
-    // Left: coloured kind tag, name, subtitle.
-    painter.circle_filled(pos2(inner.left() + 3.0, rect.top() + 21.0), 3.0, kind_color);
-    painter.text(
-        pos2(inner.left() + 12.0, rect.top() + 21.0),
-        Align2::LEFT_CENTER,
-        group.kind.label().to_uppercase(),
-        theme::semibold(10.5),
-        kind_color,
-    );
-    painter.text(
-        pos2(inner.left(), rect.top() + 41.0),
-        Align2::LEFT_CENTER,
-        &group.title,
-        theme::semibold(15.0),
-        theme::TEXT,
-    );
-    painter.text(
-        pos2(inner.left(), rect.top() + 60.0),
-        Align2::LEFT_CENTER,
-        &group.subtitle,
-        theme::regular(12.0),
-        theme::TEXT_FAINT,
-    );
-
-    // Right: chevron, then key values right-to-left.
-    let chevron_color = if hovered { theme::TEXT } else { theme::TEXT_FAINT };
-    painter.text(inner.right_center(), Align2::RIGHT_CENTER, "›", theme::regular(22.0), chevron_color);
-
-    const COLUMN: f32 = 112.0;
-    let key: Vec<&Reading> = group
-        .readings
-        .iter()
-        .filter(|r| r.featured)
-        .chain(group.readings.iter().filter(|r| !r.featured))
-        .take(3)
-        .collect();
-    // Leave the name room on narrow windows: drop values that would overlap it.
-    let title_right =
-        inner.left() + painter.layout_no_wrap(group.title.clone(), theme::semibold(15.0), theme::TEXT).size().x;
-    let mut right = inner.right() - 30.0;
-    for r in key.iter().rev() {
-        let left = right - COLUMN;
-        if left < title_right + 24.0 {
-            break;
-        }
-        painter.text(
-            pos2(right, rect.top() + 26.0),
-            Align2::RIGHT_CENTER,
-            r.label.to_uppercase(),
-            theme::semibold(10.0),
-            theme::TEXT_FAINT,
-        );
-        value_text(&painter, pos2(right, rect.top() + 48.0), (r.value, r.unit), 18.0, 11.0, Align2::RIGHT_CENTER);
-        right = left;
-    }
-
-    response
-}
-
 /// Grip of six dots for reordering; returns the drag response.
 pub fn drag_handle(ui: &mut Ui, id: egui::Id) -> egui::Response {
     let (rect, _) = ui.allocate_exact_size(vec2(18.0, 36.0), Sense::hover());
@@ -297,6 +184,46 @@ pub fn chip(ui: &mut Ui, label: &str, on: bool, enabled: bool, color: Color32) -
         dim(text),
     );
     response
+}
+
+/// Startup screen until the first samples arrive: a spinning arc with a short
+/// message, centred in the remaining space.
+pub fn waiting(ui: &mut Ui) {
+    const RADIUS: f32 = 18.0;
+    let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+    let painter = ui.painter_at(rect);
+    // Slightly above the middle, which reads as centred with the header above.
+    let center = rect.center() - vec2(0.0, 40.0);
+
+    painter.circle_stroke(center, RADIUS, Stroke::new(3.0, theme::TRACK));
+    let time = ui.input(|i| i.time) as f32;
+    let start = time * 1.6 * PI;
+    // The arc grows and shrinks while it turns, like system spinners.
+    let sweep = PI * (0.9 + 0.6 * (time * 2.2).sin());
+    let points: Vec<Pos2> = (0..=32)
+        .map(|i| {
+            let a = start + sweep * i as f32 / 32.0;
+            center + vec2(a.cos(), a.sin()) * RADIUS
+        })
+        .collect();
+    painter.add(Shape::line(points, Stroke::new(3.0, theme::ACCENT)));
+
+    painter.text(
+        center + vec2(0.0, RADIUS + 24.0),
+        Align2::CENTER_TOP,
+        "Waiting for sensors…",
+        theme::semibold(15.0),
+        theme::TEXT,
+    );
+    painter.text(
+        center + vec2(0.0, RADIUS + 48.0),
+        Align2::CENTER_TOP,
+        "Reading processor, graphics, memory, drives and network",
+        theme::regular(12.5),
+        theme::TEXT_FAINT,
+    );
+    // Only shown for a moment at startup, so a smooth 60 fps costs nothing.
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
 }
 
 /// Allocates and paints the card background, returning its rect.
@@ -539,11 +466,14 @@ pub struct Series<'a> {
 }
 
 /// Task Manager style history chart: grid, one or more lines, scale labels and a
-/// hover readout. `compact` charts show the current value instead of axis labels.
+/// hover readout. `compact` charts show the current value instead of axis labels;
+/// `note` is a faint addition after the title (e.g. a thread's clock).
+#[allow(clippy::too_many_arguments)]
 pub fn chart(
     ui: &mut Ui,
     height: f32,
     title: &str,
+    note: Option<&str>,
     series: &[Series],
     range: Option<(f64, f64)>,
     color: Color32,
@@ -576,6 +506,17 @@ pub fn chart(
             theme::regular(11.0),
             theme::TEXT_FAINT,
         )
+    };
+    let title = match note {
+        Some(note) => {
+            let width = corner.left() - title.right() - 18.0;
+            let galley = elided(&painter, note, theme::regular(11.0), theme::TEXT_FAINT, width);
+            let at = pos2(title.right() + 8.0, title.center().y - galley.size().y / 2.0);
+            let rect = Rect::from_min_size(at, galley.size());
+            painter.galley(at, galley, theme::TEXT_FAINT);
+            title.union(rect)
+        }
+        None => title,
     };
     if series.len() > 1 {
         let mut x = title.right() + 16.0;
