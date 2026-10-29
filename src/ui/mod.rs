@@ -27,6 +27,8 @@ pub struct App {
     page: Page,
     settings: Settings,
     performance: performance::State,
+    /// Whether hwmon starts with Windows; read from the registry once at startup.
+    autostart: bool,
 }
 
 impl App {
@@ -34,7 +36,13 @@ impl App {
         theme::apply(&cc.egui_ctx);
         window::style_title_bar(cc);
         let settings = cc.storage.and_then(|s| eframe::get_value(s, settings::STORAGE_KEY)).unwrap_or_default();
-        Self { model: poller::spawn(cc.egui_ctx.clone()), page: Page::Dashboard, settings, performance: Default::default() }
+        Self {
+            model: poller::spawn(cc.egui_ctx.clone()),
+            page: Page::Dashboard,
+            settings,
+            performance: Default::default(),
+            autostart: crate::autostart::enabled(),
+        }
     }
 }
 
@@ -55,6 +63,7 @@ impl eframe::App for App {
         let page = &self.page;
         let settings = &mut self.settings;
         let performance = &mut self.performance;
+        let autostart = &mut self.autostart;
         // Navigation requested during this frame; applied after drawing.
         let mut nav: Option<Page> = None;
 
@@ -88,7 +97,7 @@ impl eframe::App for App {
                         }
                         Page::Components => components(ui, &model, &mut nav),
                         Page::Component(id) => detail(ui, &model, id, &mut nav),
-                        Page::Settings => settings_page(ui, &model, settings),
+                        Page::Settings => settings_page(ui, &model, settings, autostart),
                         Page::Performance => {}
                     }
                 });
@@ -530,7 +539,7 @@ fn components(ui: &mut Ui, model: &Model, nav: &mut Option<Page>) {
 // Settings
 
 /// One section per topic; add new sections below the dashboard one.
-fn settings_page(ui: &mut Ui, model: &Model, settings: &mut Settings) {
+fn settings_page(ui: &mut Ui, model: &Model, settings: &mut Settings, autostart: &mut bool) {
     ui.add_space(4.0);
     ui.label(egui::RichText::new("Settings").font(theme::semibold(18.0)).color(theme::TEXT));
     ui.add_space(-8.0);
@@ -539,11 +548,37 @@ fn settings_page(ui: &mut Ui, model: &Model, settings: &mut Settings) {
 
     dashboard_settings(ui, model, settings);
     chart_settings(ui, settings);
+    startup_settings(ui, autostart);
 }
 
 fn chart_settings(ui: &mut Ui, settings: &mut Settings) {
     section_heading(ui, "Charts", "New samples slide in from the right while hwmon is the active window.");
     ui.add_space(6.0);
+    if switch_card(
+        ui,
+        "Animate in the background",
+        "Keep sliding when another window is active. Uses a bit more CPU.",
+        settings.slide_in_background,
+    ) {
+        settings.slide_in_background = !settings.slide_in_background;
+    }
+    ui.add_space(14.0);
+}
+
+/// `autostart` mirrors the registry; it is re-read if writing fails.
+fn startup_settings(ui: &mut Ui, autostart: &mut bool) {
+    section_heading(ui, "Startup", "Stored in Windows, so it matches the choice made in the installer.");
+    ui.add_space(6.0);
+    if switch_card(ui, "Start with Windows", "Open hwmon when you sign in.", *autostart) {
+        let _ = crate::autostart::set(!*autostart);
+        *autostart = crate::autostart::enabled();
+    }
+    ui.add_space(14.0);
+}
+
+/// Card with a title, description and an on/off switch; true when the switch was clicked.
+fn switch_card(ui: &mut Ui, title: &str, description: &str, on: bool) -> bool {
+    let mut clicked = false;
     Frame::new()
         .fill(theme::SURFACE)
         .stroke(egui::Stroke::new(1.0, theme::BORDER))
@@ -554,21 +589,15 @@ fn chart_settings(ui: &mut Ui, settings: &mut Settings) {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.label(egui::RichText::new("Animate in the background").font(theme::semibold(15.0)).color(theme::TEXT));
-                    ui.label(
-                        egui::RichText::new("Keep sliding when another window is active. Uses a bit more CPU.")
-                            .font(theme::regular(12.0))
-                            .color(theme::TEXT_DIM),
-                    );
+                    ui.label(egui::RichText::new(title).font(theme::semibold(15.0)).color(theme::TEXT));
+                    ui.label(egui::RichText::new(description).font(theme::regular(12.0)).color(theme::TEXT_DIM));
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if widgets::toggle(ui, settings.slide_in_background).clicked() {
-                        settings.slide_in_background = !settings.slide_in_background;
-                    }
+                    clicked = widgets::toggle(ui, on).clicked();
                 });
             });
         });
-    ui.add_space(14.0);
+    clicked
 }
 
 fn section_heading(ui: &mut Ui, title: &str, description: &str) {

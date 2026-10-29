@@ -33,19 +33,25 @@ fn colorref(c: Color32) -> COLORREF {
     COLORREF(c.r() as u32 | (c.g() as u32) << 8 | (c.b() as u32) << 16)
 }
 
-/// A 64×64 icon: dark rounded tile with a cool-to-hot gauge arc, drawn procedurally
-/// so no image file or decoder is needed.
+/// The window icon. The same drawing, at several sizes, is embedded in the exe as
+/// `assets/hwmon.ico` (see the ignored test below).
 pub fn app_icon() -> IconData {
     const SIZE: u32 = 64;
-    let s = SIZE as f32;
-    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    IconData { rgba: render_icon(SIZE), width: SIZE, height: SIZE }
+}
+
+/// Dark rounded tile with a cool-to-hot gauge arc as RGBA, drawn procedurally so no
+/// image file or decoder is needed.
+fn render_icon(size: u32) -> Vec<u8> {
+    let s = size as f32;
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
 
     let (start, sweep) = (0.75 * std::f32::consts::PI, 1.5 * std::f32::consts::PI);
     let (radius, half_width) = (s * 0.30, s * 0.075);
     let filled = 0.72;
 
-    for y in 0..SIZE {
-        for x in 0..SIZE {
+    for y in 0..size {
+        for x in 0..size {
             let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
 
             // Rounded tile.
@@ -74,7 +80,7 @@ pub fn app_icon() -> IconData {
         }
     }
 
-    IconData { rgba, width: SIZE, height: SIZE }
+    rgba
 }
 
 /// Anti-aliased coverage for a signed distance (negative = inside).
@@ -90,4 +96,53 @@ fn blend(under: Color32, over: Color32, alpha: f32) -> Color32 {
     let [or, og, ob, _] = over.to_srgba_unmultiplied();
     let base = if under.a() == 0 { [or, og, ob] } else { [mix(ur, or), mix(ug, og), mix(ub, ob)] };
     Color32::from_rgba_unmultiplied(base[0], base[1], base[2], (out_a * 255.0).round() as u8)
+}
+
+#[cfg(test)]
+mod tests {
+    /// Regenerates `assets/hwmon.ico`, which `build.rs` embeds into the exe:
+    /// `cargo test write_icon_file -- --ignored`
+    #[test]
+    #[ignore]
+    fn write_icon_file() {
+        const SIZES: [u32; 6] = [16, 24, 32, 48, 64, 256];
+        let images: Vec<Vec<u8>> = SIZES.iter().map(|&size| bmp_entry(size, &super::render_icon(size))).collect();
+        let mut ico = Vec::new();
+        ico.extend_from_slice(&[0, 0, 1, 0]); // reserved, type = icon
+        ico.extend_from_slice(&(SIZES.len() as u16).to_le_bytes());
+        let mut offset = 6 + 16 * SIZES.len();
+        for (&size, image) in SIZES.iter().zip(&images) {
+            let dim = if size >= 256 { 0 } else { size as u8 };
+            ico.extend_from_slice(&[dim, dim, 0, 0]);
+            ico.extend_from_slice(&1u16.to_le_bytes()); // planes
+            ico.extend_from_slice(&32u16.to_le_bytes()); // bits per pixel
+            ico.extend_from_slice(&(image.len() as u32).to_le_bytes());
+            ico.extend_from_slice(&(offset as u32).to_le_bytes());
+            offset += image.len();
+        }
+        images.iter().for_each(|image| ico.extend_from_slice(image));
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets").join("hwmon.ico");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, ico).unwrap();
+    }
+
+    /// One icon image as a 32-bit DIB: header, BGRA rows bottom-up, empty AND mask.
+    fn bmp_entry(size: u32, rgba: &[u8]) -> Vec<u8> {
+        let mask_row = size.div_ceil(32) * 4;
+        let mut out = Vec::new();
+        for v in [40, size, size * 2] {
+            out.extend_from_slice(&v.to_le_bytes()); // header size, width, height (image + mask)
+        }
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&32u16.to_le_bytes());
+        out.extend_from_slice(&[0; 24]); // no compression, sizes and palette left at 0
+        for y in (0..size).rev() {
+            for x in 0..size {
+                let i = ((y * size + x) * 4) as usize;
+                out.extend_from_slice(&[rgba[i + 2], rgba[i + 1], rgba[i], rgba[i + 3]]);
+            }
+        }
+        out.resize(out.len() + (mask_row * size) as usize, 0);
+        out
+    }
 }
