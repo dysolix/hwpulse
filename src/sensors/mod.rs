@@ -4,6 +4,7 @@
 
 mod battery;
 mod displays;
+mod gpu;
 mod netinfo;
 pub mod nvml;
 mod pdh;
@@ -137,6 +138,8 @@ pub struct Group {
 pub enum Kind {
     Cpu,
     Gpu,
+    /// A GPU built into the CPU, next to a dedicated card (alone it is just [`Kind::Gpu`]).
+    IntegratedGpu,
     Memory,
     Disk,
     /// USB sticks, USB enclosures and other hot-pluggable drives.
@@ -150,6 +153,7 @@ impl Kind {
         match self {
             Kind::Cpu => "Processor",
             Kind::Gpu => "Graphics",
+            Kind::IntegratedGpu => "Integrated graphics",
             Kind::Memory => "Memory",
             Kind::Disk => "Storage",
             Kind::ExternalDisk => "External storage",
@@ -207,10 +211,20 @@ pub fn create_providers() -> (Vec<Box<dyn SensorProvider>>, Vec<String>) {
         Ok(p) => providers.push(Box::new(p)),
         Err(e) => errors.push(format!("System: {e}")),
     }
-    match nvml::NvmlProvider::new() {
-        Ok(Some(p)) => providers.push(Box::new(p)),
-        Ok(None) => {} // no NVIDIA GPU in this machine
-        Err(e) => errors.push(format!("NVIDIA: {e}")),
+    let has_nvml = match nvml::NvmlProvider::new() {
+        Ok(Some(p)) => {
+            providers.push(Box::new(p));
+            true
+        }
+        Ok(None) => false, // no NVIDIA GPU in this machine
+        Err(e) => {
+            errors.push(format!("NVIDIA: {e}"));
+            false
+        }
+    };
+    // Every other GPU, and NVIDIA ones too when NVML is not available.
+    if let Some(p) = gpu::GpuProvider::new(has_nvml) {
+        providers.push(Box::new(p));
     }
 
     (providers, errors)

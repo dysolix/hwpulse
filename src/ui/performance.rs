@@ -297,7 +297,7 @@ fn summary(group: &Group) -> String {
     let fmt = |r: &Reading| widgets::format_value(r.value, r.unit);
     let parts: Vec<String> = match group.kind {
         Kind::Cpu => ["load", "clock"].iter().filter_map(|id| get(id)).map(fmt).collect(),
-        Kind::Gpu => ["load", "temp"].iter().filter_map(|id| get(id)).map(fmt).collect(),
+        Kind::Gpu | Kind::IntegratedGpu => ["load", "temp"].iter().filter_map(|id| get(id)).map(fmt).collect(),
         Kind::Memory => get("used")
             .map(|r| {
                 let mut parts = vec![fmt(r)];

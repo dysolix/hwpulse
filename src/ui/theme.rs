@@ -43,6 +43,7 @@ pub fn kind_color(kind: Kind) -> Color32 {
     match kind {
         Kind::Cpu => Color32::from_rgb(0x7C, 0x8C, 0xFF),
         Kind::Gpu => Color32::from_rgb(0x3D, 0xD6, 0x8C),
+        Kind::IntegratedGpu => Color32::from_rgb(0x2D, 0xB8, 0x9A),
         Kind::Memory => Color32::from_rgb(0xC0, 0x84, 0xFC),
         Kind::Disk => Color32::from_rgb(0x5C, 0xC8, 0xFF),
         Kind::ExternalDisk => Color32::from_rgb(0x38, 0xBD, 0xC8),
