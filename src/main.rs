@@ -12,7 +12,8 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("Hardware Monitor")
             .with_inner_size([1180.0, 940.0])
-            .with_min_inner_size([520.0, 420.0]),
+            .with_min_inner_size([520.0, 420.0])
+            .with_icon(std::sync::Arc::new(ui::window::app_icon())),
         ..Default::default()
     };
     eframe::run_native("hwmon", options, Box::new(|cc| Ok(Box::new(ui::App::new(cc)))))

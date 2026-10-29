@@ -33,7 +33,7 @@ pub fn accent(unit: Unit, value: f64) -> Color32 {
     }
 }
 
-fn heat(celsius: f64) -> Color32 {
+pub fn heat(celsius: f64) -> Color32 {
     const STOPS: [(f64, [u8; 3]); 4] = [
         (35.0, [0x3D, 0xD6, 0xA6]),
         (60.0, [0x9B, 0xD8, 0x4A]),

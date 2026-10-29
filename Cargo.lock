@@ -854,6 +854,7 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "nvml-wrapper",
+ "raw-window-handle",
  "serde",
  "windows",
  "wmi",

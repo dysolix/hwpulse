@@ -1,5 +1,6 @@
 pub mod theme;
 pub mod widgets;
+pub mod window;
 
 use eframe::egui::{self, Align2, CentralPanel, Frame, Margin, ScrollArea, Sense, Ui, vec2};
 
@@ -13,6 +14,7 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::apply(&cc.egui_ctx);
+        window::style_title_bar(cc);
         Self { model: poller::spawn(cc.egui_ctx.clone()) }
     }
 }
