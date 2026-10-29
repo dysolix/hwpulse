@@ -1,0 +1,70 @@
+# Raises the version in Cargo.toml, commits and tags it, then starts the Release
+# workflow for that tag. "none" tags the current version as is.
+name: Version
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump
+        type: choice
+        options: [patch, minor, major, none]
+        default: patch
+
+permissions:
+  contents: write # push the commit and tag
+  actions: write # start the Release workflow
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Determine version
+        id: version
+        shell: bash
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          current=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          IFS=. read -r major minor patch <<< "${current%%-*}"
+          case "$BUMP" in
+            major) version="$((major + 1)).0.0" ;;
+            minor) version="$major.$((minor + 1)).0" ;;
+            patch) version="$major.$minor.$((patch + 1))" ;;
+            none) version=$current ;;
+          esac
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null; then
+            echo "::error::Tag v$version already exists"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "$current -> $version"
+
+      - name: Commit and tag
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # Only the first `version =` line is the package's own.
+          sed -i "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml
+          # Same for the lock file entry right after `name = "hwmon"`.
+          sed -i "/^name = \"hwmon\"$/{n;s/^version = \".*\"/version = \"$VERSION\"/}" Cargo.lock
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet; then
+            git commit -am "Release v$VERSION"
+            git push origin "HEAD:$GITHUB_REF_NAME"
+          fi
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+
+      # Tags pushed with the workflow token don't trigger other workflows,
+      # but starting one explicitly is allowed.
+      - name: Start release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: gh workflow run release.yml --ref "v$VERSION"

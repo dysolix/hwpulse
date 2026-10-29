@@ -1,0 +1,62 @@
+# Builds the portable exe and the installer for the checked-out commit and uploads
+# them as a workflow artifact. Run it by hand for a test build; Release reuses it.
+name: Build
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    outputs:
+      version:
+        description: Version from Cargo.toml
+        value: ${{ jobs.build.outputs.version }}
+      artifact:
+        description: Name of the uploaded artifact
+        value: ${{ jobs.build.outputs.artifact }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.files.outputs.version }}
+      artifact: ${{ steps.files.outputs.artifact }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+
+      - name: Build exe and installer
+        shell: pwsh
+        run: ./installer/build.ps1
+
+      - name: Collect files
+        id: files
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          New-Item dist -ItemType Directory | Out-Null
+          Copy-Item target/release/hwmon.exe "dist/hwmon-$version-portable.exe"
+          Copy-Item "target/installer/hwmon-setup-$version.exe" dist/
+          Get-ChildItem dist | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content dist/SHA256SUMS.txt
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "artifact=hwmon-$version" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.files.outputs.artifact }}
+          path: dist/
+          # Artifacts count against the private repo's storage; releases don't.
+          retention-days: 7
