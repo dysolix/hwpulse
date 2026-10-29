@@ -49,7 +49,9 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let model = self.model.lock().unwrap();
-        widgets::set_timeline(ui.ctx(), model.updated.map(|t| t.elapsed()));
+        let focused = ui.ctx().input(|i| i.viewport().focused.unwrap_or(true));
+        let slide = focused || self.settings.slide_in_background;
+        widgets::set_timeline(ui.ctx(), model.updated.filter(|_| slide).map(|t| t.elapsed()));
         let page = &self.page;
         let settings = &mut self.settings;
         let performance = &mut self.performance;
@@ -536,6 +538,37 @@ fn settings_page(ui: &mut Ui, model: &Model, settings: &mut Settings) {
     ui.add_space(10.0);
 
     dashboard_settings(ui, model, settings);
+    chart_settings(ui, settings);
+}
+
+fn chart_settings(ui: &mut Ui, settings: &mut Settings) {
+    section_heading(ui, "Charts", "New samples slide in from the right while hwmon is the active window.");
+    ui.add_space(6.0);
+    Frame::new()
+        .fill(theme::SURFACE)
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .corner_radius(CornerRadius::same(theme::CARD_RADIUS))
+        .inner_margin(Margin::symmetric(20, 16))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(egui::RichText::new("Animate in the background").font(theme::semibold(15.0)).color(theme::TEXT));
+                    ui.label(
+                        egui::RichText::new("Keep sliding when another window is active. Uses a bit more CPU.")
+                            .font(theme::regular(12.0))
+                            .color(theme::TEXT_DIM),
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if widgets::toggle(ui, settings.slide_in_background).clicked() {
+                        settings.slide_in_background = !settings.slide_in_background;
+                    }
+                });
+            });
+        });
+    ui.add_space(14.0);
 }
 
 fn section_heading(ui: &mut Ui, title: &str, description: &str) {
@@ -549,10 +582,10 @@ fn dashboard_settings(ui: &mut Ui, model: &Model, settings: &mut Settings) {
         ui,
         "Dashboard",
         "Drag the handle to reorder, switch components on or off and pick which values get a card. \
-         New components show up automatically.",
+         GPUs, CPU and memory are shown by default; drives and network adapters start hidden.",
     );
     let resets = [
-        (!settings.visibility_is_default(), "Show everything again"),
+        (!settings.visibility_is_default(), "Reset to default"),
         (!settings.order.is_empty(), "Reset order"),
     ];
     if resets.iter().any(|(show, _)| *show) {
@@ -728,7 +761,7 @@ fn reorder_list(ui: &mut Ui, model: &Model, settings: &mut Settings) {
 
 /// One component card on the settings page; `lifted` styles it as being dragged.
 fn settings_card(ui: &mut Ui, group: &Group, settings: &mut Settings, handle_id: egui::Id, lifted: bool) -> Rect {
-    let visible = settings.group_visible(&group.id);
+    let visible = settings.group_visible(group);
     let color = theme::kind_color(group.kind);
 
     let mut frame = Frame::new()
@@ -760,7 +793,7 @@ fn settings_card(ui: &mut Ui, group: &Group, settings: &mut Settings, handle_id:
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if widgets::toggle(ui, visible).clicked() {
-                            settings.toggle_group(&group.id);
+                            settings.toggle_group(group);
                         }
                     });
                 });

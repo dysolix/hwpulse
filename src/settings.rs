@@ -1,39 +1,50 @@
 //! User choices, persisted by eframe (`%APPDATA%\hwmon\data\app.ron`).
 //!
-//! Hidden items are stored rather than shown ones, so newly detected components
-//! (a plugged-in drive, a new GPU) appear on the dashboard by default.
+//! Only deviations from the defaults are stored, so a newly detected component
+//! follows the default for its kind: GPUs, CPU and memory are shown, drives and
+//! network adapters start hidden.
 
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::sensors::Group;
+use crate::sensors::{Group, Kind};
 
 pub const STORAGE_KEY: &str = "settings";
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// [`Group::id`]s hidden from the dashboard.
+    /// [`Group::id`]s hidden from the dashboard although shown by default.
     pub hidden_groups: BTreeSet<String>,
+    /// [`Group::id`]s shown on the dashboard although hidden by default.
+    pub shown_groups: BTreeSet<String>,
     /// `"{group id}/{reading id}"` of individual cards hidden from the dashboard.
     pub hidden_readings: BTreeSet<String>,
     /// Custom dashboard order as [`Group::id`]s; empty means the default order.
     pub order: Vec<String>,
+    /// Let charts slide while the window is not focused; otherwise they jump once
+    /// per second there, which costs almost nothing.
+    pub slide_in_background: bool,
 }
 
 impl Settings {
-    pub fn group_visible(&self, group: &str) -> bool {
-        !self.hidden_groups.contains(group)
+    pub fn group_visible(&self, group: &Group) -> bool {
+        if shown_by_default(group.kind) {
+            !self.hidden_groups.contains(&group.id)
+        } else {
+            self.shown_groups.contains(&group.id)
+        }
     }
 
     pub fn reading_visible(&self, group: &str, reading: &str) -> bool {
         !self.hidden_readings.contains(&reading_key(group, reading))
     }
 
-    pub fn toggle_group(&mut self, group: &str) {
-        if !self.hidden_groups.remove(group) {
-            self.hidden_groups.insert(group.to_string());
+    pub fn toggle_group(&mut self, group: &Group) {
+        let overrides = if shown_by_default(group.kind) { &mut self.hidden_groups } else { &mut self.shown_groups };
+        if !overrides.remove(&group.id) {
+            overrides.insert(group.id.clone());
         }
     }
 
@@ -45,12 +56,13 @@ impl Settings {
     }
 
     pub fn visibility_is_default(&self) -> bool {
-        self.hidden_groups.is_empty() && self.hidden_readings.is_empty()
+        self.hidden_groups.is_empty() && self.shown_groups.is_empty() && self.hidden_readings.is_empty()
     }
 
-    /// Shows every component and card again; order and other settings are kept.
+    /// Restores the default components and shows every card again; order is kept.
     pub fn reset_visibility(&mut self) {
         self.hidden_groups.clear();
+        self.shown_groups.clear();
         self.hidden_readings.clear();
     }
 
@@ -97,7 +109,7 @@ impl Settings {
     pub fn dashboard_groups(&self, groups: &[Group]) -> Vec<Group> {
         self.ordered(groups)
             .into_iter()
-            .filter(|g| self.group_visible(&g.id))
+            .filter(|g| self.group_visible(g))
             .map(|g| {
                 let mut g = g.clone();
                 let id = g.id.clone();
@@ -109,6 +121,10 @@ impl Settings {
     }
 }
 
+fn shown_by_default(kind: Kind) -> bool {
+    matches!(kind, Kind::Gpu | Kind::Cpu | Kind::Memory)
+}
+
 fn reading_key(group: &str, reading: &str) -> String {
     format!("{group}/{reading}")
 }
@@ -116,13 +132,18 @@ fn reading_key(group: &str, reading: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sensors::Kind;
 
     fn groups(ids: &[&str]) -> Vec<Group> {
         ids.iter()
             .map(|id| Group {
                 id: id.to_string(),
-                kind: Kind::Cpu,
+                kind: match *id {
+                    "gpu" => Kind::Gpu,
+                    "mem" => Kind::Memory,
+                    "net" => Kind::Network,
+                    id if id.starts_with("disk") => Kind::Disk,
+                    _ => Kind::Cpu,
+                },
                 order: 0,
                 title: String::new(),
                 subtitle: String::new(),
@@ -140,6 +161,21 @@ mod tests {
     fn default_order_without_custom_order() {
         let g = groups(&["cpu", "gpu", "mem"]);
         assert_eq!(ids(&Settings::default().ordered(&g)), ["cpu", "gpu", "mem"]);
+    }
+
+    #[test]
+    fn default_visibility_by_kind_and_toggling() {
+        let g = groups(&["gpu", "cpu", "mem", "disk1", "net"]);
+        let mut s = Settings::default();
+        let visible = |s: &Settings| g.iter().filter(|g| s.group_visible(g)).map(|g| g.id.clone()).collect::<Vec<_>>();
+        assert_eq!(visible(&s), ["gpu", "cpu", "mem"]);
+        s.toggle_group(&g[3]); // show disk1
+        s.toggle_group(&g[1]); // hide cpu
+        assert_eq!(visible(&s), ["gpu", "mem", "disk1"]);
+        assert!(!s.visibility_is_default());
+        s.toggle_group(&g[3]);
+        s.toggle_group(&g[1]);
+        assert!(s.visibility_is_default());
     }
 
     #[test]

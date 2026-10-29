@@ -420,7 +420,8 @@ fn sparkline(ui: &Ui, key: &str, rect: Rect, values: &VecDeque<f32>, range: Opti
 }
 
 /// How long new samples take to slide in from the right edge.
-const SLIDE: f32 = 0.5;
+/// Short on purpose: every frame of it costs a full redraw.
+const SLIDE: f32 = 0.3;
 
 /// Where the charts are between two polls; shared by every chart in a frame.
 #[derive(Clone, Copy, Default)]
@@ -580,19 +581,26 @@ pub fn chart(
         }
     }
 
-    // Hover readout: the samples under the pointer, following the sliding line.
+    // Hover readout. The marker stays on the sample slot under the pointer while the
+    // line slides through it: the dots ride the line, while the text always shows
+    // the sample that settles in this slot, so it changes once per update.
     let Some(pointer) = ui.ctx().pointer_hover_pos().filter(|p| plot.contains(*p) && ui.rect_contains_pointer(rect)) else {
         return;
     };
     let step = plot.width() / (HISTORY_LEN - 1) as f32;
-    let shift = timeline(ui.ctx()).shift;
-    let ago = ((plot.right() + shift * step - pointer.x) / step).round().max(0.0) as usize;
-    let x = plot.right() - (ago as f32 - shift) * step;
+    let slot = ((plot.right() - pointer.x) / step).round().max(0.0);
+    let x = plot.right() - slot * step;
+    // Samples back from the newest that sit under the marker right now (fractional mid-slide).
+    let under = slot + timeline(ui.ctx()).shift;
+    let ago = slot as usize;
     let mut lines = Vec::new();
     for s in series {
         let Some(h) = s.history.filter(|h| ago < h.len()) else { continue };
         let v = h[h.len() - 1 - ago];
-        let t = ((v - line_lo) / (line_hi - line_lo)).clamp(0.0, 1.0);
+        let at = |i: usize| h[h.len() - 1 - i.min(h.len() - 1)];
+        let (newer, frac) = (under.floor() as usize, under.fract());
+        let line_v = at(newer) + (at(newer + 1) - at(newer)) * frac;
+        let t = ((line_v - line_lo) / (line_hi - line_lo)).clamp(0.0, 1.0);
         painter.circle_filled(pos2(x, plot.bottom() - t * plot.height()), 3.5, color);
         lines.push(if series.len() > 1 {
             format!("{}  {}", s.label, format_value(v as f64, s.unit))

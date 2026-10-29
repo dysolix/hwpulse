@@ -94,8 +94,8 @@ pub struct BreakdownItem {
 
 /// Sort keys so groups from different providers interleave sensibly.
 pub mod order {
-    pub const CPU: u16 = 0;
-    pub const GPU: u16 = 100;
+    pub const GPU: u16 = 0;
+    pub const CPU: u16 = 100;
     pub const MEMORY: u16 = 200;
     pub const NETWORK: u16 = 300;
     pub const DISK: u16 = 400;
