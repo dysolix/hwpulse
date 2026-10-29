@@ -231,9 +231,20 @@ impl SystemProvider {
             }
         }
 
-        instances
+        // Internal drives first, then external ones; each by first drive letter
+        // (C:, D:, …), drives without a letter last.
+        let mut sorted = instances.clone();
+        sorted.sort_by_key(|name| {
+            let (index, letters) = name.split_once(' ').unwrap_or((name, ""));
+            let index = index.parse::<u32>().unwrap_or(u32::MAX);
+            let external = self.inventory.disks.get(&index).is_some_and(|d| d.external);
+            (external, letters.chars().next().unwrap_or('~'), index)
+        });
+
+        sorted
             .into_iter()
-            .map(|instance| {
+            .enumerate()
+            .map(|(rank, instance)| {
                 // Instance names look like "0 C:" or "1 D: E:".
                 let (index, letters) = instance.split_once(' ').unwrap_or((instance, ""));
                 let index: u32 = index.parse().unwrap_or(u32::MAX);
@@ -255,7 +266,8 @@ impl SystemProvider {
                     });
                 }
 
-                let mut subtitle = vec![format!("Disk {index}")];
+                let mut subtitle: Vec<String> = info.and_then(DiskInfo::type_label).into_iter().collect();
+                subtitle.push(format!("Disk {index}"));
                 if !letters.is_empty() {
                     subtitle.push(letters.to_string());
                 }
@@ -263,13 +275,19 @@ impl SystemProvider {
                     subtitle.push(format_size(size));
                 }
 
-                // The model is part of the id so a different drive at the same disk
-                // number never inherits another drive's history or detail page.
-                let model = info.map(|d| d.model.as_str()).unwrap_or("");
+                // Identify the physical drive by serial number, so settings, history and
+                // an open detail page follow it across disk numbers and USB ports.
+                // Without a serial, number + model at least keeps different drives apart.
+                let id = match info {
+                    Some(DiskInfo { serial: Some(serial), .. }) => format!("disk/{serial}"),
+                    Some(d) => format!("disk/{index}/{}", d.model),
+                    None => format!("disk/{index}"),
+                };
+                let external = info.is_some_and(|d| d.external);
                 Group {
-                    id: format!("disk/{index}/{model}"),
-                    kind: Kind::Disk,
-                    order: order::DISK + index.min(99) as u16,
+                    id,
+                    kind: if external { Kind::ExternalDisk } else { Kind::Disk },
+                    order: order::DISK + rank.min(99) as u16,
                     breakdown: None,
                     title: info.map(|d| d.model.clone()).unwrap_or_else(|| format!("Disk {index}")),
                     subtitle: subtitle.join(" · "),
@@ -372,6 +390,25 @@ struct Inventory {
 struct DiskInfo {
     model: String,
     size: Option<u64>,
+    serial: Option<String>,
+    external: bool,
+    bus: Option<&'static str>,
+    media: Option<&'static str>,
+}
+
+impl DiskInfo {
+    /// E.g. "NVMe SSD", "SATA HDD", "External · USB".
+    fn type_label(&self) -> Option<String> {
+        let parts: Vec<&str> = [self.external.then_some("External"), self.bus, self.media].into_iter().flatten().collect();
+        if parts.is_empty() {
+            return None;
+        }
+        // "External" reads as its own item; bus and media read as one ("NVMe SSD").
+        Some(match parts.split_first() {
+            Some((&"External", rest)) if !rest.is_empty() => format!("External · {}", rest.join(" ")),
+            _ => parts.join(" "),
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -406,6 +443,11 @@ struct Win32DiskDrive {
     index: u32,
     model: Option<String>,
     size: Option<u64>,
+    serial_number: Option<String>,
+    interface_type: Option<String>,
+    media_type: Option<String>,
+    #[serde(rename = "PNPDeviceID")]
+    pnp_device_id: Option<String>,
 }
 
 impl Inventory {
@@ -460,15 +502,80 @@ impl Inventory {
 
 fn load_disks(wmi: &wmi::WMIConnection) -> HashMap<u32, DiskInfo> {
     let Ok(disks) = wmi.query::<Win32DiskDrive>() else { return HashMap::new() };
+    let mut types = load_disk_types();
     disks
         .into_iter()
         .map(|d| {
+            let external = is_external(&d);
             let mut model = d.model.unwrap_or_else(|| format!("Disk {}", d.index)).trim().to_string();
             // Seagate reports bare part numbers like "ST4000VN006-3CW104".
             if model.starts_with("ST") && model[2..].starts_with(|c: char| c.is_ascii_digit()) {
                 model = format!("Seagate {model}");
             }
-            (d.index, DiskInfo { model, size: d.size })
+            // Serials come padded ("    WW60QK2F") or with a trailing dot (NVMe EUI).
+            let serial = d
+                .serial_number
+                .map(|s| s.trim().trim_end_matches('.').to_string())
+                .filter(|s| !s.is_empty());
+            let (bus, media) = types.remove(&d.index).unwrap_or_default();
+            (d.index, DiskInfo { model, size: d.size, serial, external, bus, media })
         })
         .collect()
+}
+
+/// Bus ("NVMe", "SATA", …) and media ("SSD", "HDD") per disk number, from the
+/// Storage Management API (what `Get-PhysicalDisk` shows). No admin needed.
+fn load_disk_types() -> HashMap<u32, (Option<&'static str>, Option<&'static str>)> {
+    let Ok(wmi) = wmi::WMIConnection::with_namespace_path(r"ROOT\Microsoft\Windows\Storage") else {
+        return HashMap::new();
+    };
+    let Ok(disks) = wmi.query::<MsftPhysicalDisk>() else { return HashMap::new() };
+
+    disks
+        .into_iter()
+        .filter_map(|d| {
+            let index = d.device_id.trim().parse().ok()?;
+            let bus = match d.bus_type? {
+                7 => "USB",
+                8 => "RAID",
+                10 => "SAS",
+                11 => "SATA",
+                12 => "SD",
+                13 => "MMC",
+                17 => "NVMe",
+                18 => "SCM",
+                _ => return Some((index, (None, media_label(d.media_type)))),
+            };
+            Some((index, (Some(bus), media_label(d.media_type))))
+        })
+        .collect()
+}
+
+fn media_label(media_type: Option<u16>) -> Option<&'static str> {
+    match media_type? {
+        3 => Some("HDD"),
+        4 => Some("SSD"),
+        5 => Some("SCM"),
+        _ => None, // 0 = unspecified, typical for USB sticks
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename = "MSFT_PhysicalDisk", rename_all = "PascalCase")]
+struct MsftPhysicalDisk {
+    device_id: String,
+    media_type: Option<u16>,
+    bus_type: Option<u16>,
+}
+
+/// USB sticks, USB/UASP enclosures and other hot-pluggable media.
+fn is_external(d: &Win32DiskDrive) -> bool {
+    let interface = d.interface_type.as_deref().unwrap_or("");
+    let media = d.media_type.as_deref().unwrap_or("").to_lowercase();
+    let pnp = d.pnp_device_id.as_deref().unwrap_or("");
+    interface.eq_ignore_ascii_case("USB")
+        || interface.eq_ignore_ascii_case("1394")
+        || media.contains("removable")
+        || media.contains("external")
+        || pnp.starts_with("USBSTOR\\")
 }

@@ -56,6 +56,8 @@ pub enum Kind {
     Gpu,
     Memory,
     Disk,
+    /// USB sticks, USB enclosures and other hot-pluggable drives.
+    ExternalDisk,
     Network,
 }
 
@@ -66,6 +68,7 @@ impl Kind {
             Kind::Gpu => "Graphics",
             Kind::Memory => "Memory",
             Kind::Disk => "Storage",
+            Kind::ExternalDisk => "External storage",
             Kind::Network => "Network",
         }
     }
@@ -94,8 +97,8 @@ pub mod order {
     pub const CPU: u16 = 0;
     pub const GPU: u16 = 100;
     pub const MEMORY: u16 = 200;
-    pub const DISK: u16 = 300;
-    pub const NETWORK: u16 = 400;
+    pub const NETWORK: u16 = 300;
+    pub const DISK: u16 = 400;
 }
 
 pub trait SensorProvider {
@@ -119,7 +122,8 @@ pub fn create_providers() -> (Vec<Box<dyn SensorProvider>>, Vec<String>) {
         Err(e) => errors.push(format!("System: {e}")),
     }
     match nvml::NvmlProvider::new() {
-        Ok(p) => providers.push(Box::new(p)),
+        Ok(Some(p)) => providers.push(Box::new(p)),
+        Ok(None) => {} // no NVIDIA GPU in this machine
         Err(e) => errors.push(format!("NVIDIA: {e}")),
     }
 

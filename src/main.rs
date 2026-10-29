@@ -3,6 +3,7 @@
 
 mod poller;
 mod sensors;
+mod settings;
 mod ui;
 
 use eframe::egui;

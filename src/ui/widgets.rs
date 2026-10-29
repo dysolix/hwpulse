@@ -215,6 +215,53 @@ pub fn component_row(ui: &mut Ui, group: &Group) -> egui::Response {
     response
 }
 
+/// On/off switch.
+pub fn toggle(ui: &mut Ui, on: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(40.0, 22.0), Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let painter = ui.painter();
+
+    let track = match (on, response.hovered()) {
+        (true, _) => theme::ACCENT,
+        (false, true) => theme::BORDER_HOVER,
+        (false, false) => theme::TRACK,
+    };
+    painter.rect_filled(rect, CornerRadius::same(11), track);
+    let x = if on { rect.right() - 11.0 } else { rect.left() + 11.0 };
+    let knob = if on { theme::BG } else { theme::TEXT_DIM };
+    painter.circle_filled(pos2(x, rect.center().y), 7.5, knob);
+    response
+}
+
+/// Pill-shaped toggle for one value. Disabled chips are dimmed and not clickable.
+pub fn chip(ui: &mut Ui, label: &str, on: bool, enabled: bool, color: Color32) -> egui::Response {
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), theme::semibold(12.0), theme::TEXT);
+    let size = vec2(galley.size().x + 40.0, 30.0);
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, response) = ui.allocate_exact_size(size, sense);
+    let response = if enabled { response.on_hover_cursor(egui::CursorIcon::PointingHand) } else { response };
+    let hovered = enabled && response.hovered();
+    let dim = |c: Color32| if enabled { c } else { c.gamma_multiply(0.45) };
+    let painter = ui.painter();
+
+    let (fill, stroke) = if on {
+        (color.gamma_multiply(if hovered { 0.24 } else { 0.14 }), color.gamma_multiply(0.55))
+    } else {
+        (Color32::TRANSPARENT, if hovered { theme::BORDER_HOVER } else { theme::BORDER })
+    };
+    painter.rect(rect, CornerRadius::same(15), dim(fill), Stroke::new(1.0, dim(stroke)), StrokeKind::Inside);
+
+    let dot = pos2(rect.left() + 16.0, rect.center().y);
+    if on {
+        painter.circle_filled(dot, 4.0, dim(color));
+    } else {
+        painter.circle_stroke(dot, 3.5, Stroke::new(1.2, dim(theme::TEXT_FAINT)));
+    }
+    let text = if on { theme::TEXT } else { theme::TEXT_DIM };
+    painter.galley_with_override_text_color(pos2(rect.left() + 27.0, rect.center().y - galley.size().y / 2.0), galley, dim(text));
+    response
+}
+
 /// Allocates and paints the card background, returning its rect.
 fn card(ui: &mut Ui, height: f32) -> Rect {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());

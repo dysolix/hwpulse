@@ -1,0 +1,4 @@
+# Link the MSVC C runtime into the exe so it runs on a fresh Windows install
+# without the Visual C++ Redistributable (VCRUNTIME140.dll).
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

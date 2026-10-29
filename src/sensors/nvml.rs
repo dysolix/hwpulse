@@ -3,6 +3,7 @@
 
 use nvml_wrapper::Device;
 use nvml_wrapper::Nvml;
+use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
 
 use super::{Group, Kind, Reading, SensorProvider, Unit};
@@ -22,10 +23,22 @@ struct Gpu {
 }
 
 impl NvmlProvider {
-    pub fn new() -> Result<Self, String> {
+    /// `Ok(None)` when the machine simply has no NVIDIA GPU or driver; that is not
+    /// an error worth showing. Other failures are reported.
+    pub fn new() -> Result<Option<Self>, String> {
+        let nvml = match Nvml::init() {
+            Ok(nvml) => nvml,
+            Err(
+                NvmlError::LibloadingError(_)
+                | NvmlError::LibraryNotFound
+                | NvmlError::DriverNotLoaded
+                | NvmlError::NotFound,
+            ) => return Ok(None),
+            Err(e) => return Err(e.to_string()),
+        };
         // NVML stays loaded for the whole process lifetime; leaking it gives
         // `Device<'static>` handles without a self-referential struct.
-        let nvml: &'static Nvml = Box::leak(Box::new(Nvml::init().map_err(|e| e.to_string())?));
+        let nvml: &'static Nvml = Box::leak(Box::new(nvml));
         let driver = nvml.sys_driver_version().unwrap_or_default();
 
         let count = nvml.device_count().map_err(|e| e.to_string())?;
@@ -43,10 +56,7 @@ impl NvmlProvider {
                 device,
             });
         }
-        if gpus.is_empty() {
-            return Err("no NVIDIA GPU found".into());
-        }
-        Ok(Self { gpus })
+        Ok((!gpus.is_empty()).then_some(Self { gpus }))
     }
 }
 

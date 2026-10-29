@@ -43,6 +43,7 @@ pub fn kind_color(kind: Kind) -> Color32 {
         Kind::Gpu => Color32::from_rgb(0x3D, 0xD6, 0x8C),
         Kind::Memory => Color32::from_rgb(0xC0, 0x84, 0xFC),
         Kind::Disk => Color32::from_rgb(0x5C, 0xC8, 0xFF),
+        Kind::ExternalDisk => Color32::from_rgb(0x38, 0xBD, 0xC8),
         Kind::Network => Color32::from_rgb(0xF4, 0x72, 0xB6),
     }
 }
