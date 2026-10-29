@@ -95,7 +95,9 @@ impl eframe::App for App {
 fn header(ui: &mut Ui, model: &Model, page: &Page, nav: &mut Option<Page>) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::hover());
     let p = ui.painter().clone();
-    p.text(rect.left_center(), Align2::LEFT_CENTER, "Hardware Monitor", theme::semibold(22.0), theme::TEXT);
+    let title = p.layout_no_wrap("Hardware Monitor".to_owned(), theme::semibold(22.0), theme::TEXT);
+    let title_width = title.size().x;
+    p.galley(rect.left_center() - vec2(0.0, title.size().y / 2.0), title, theme::TEXT);
     if let Some(machine) = &model.machine {
         p.text(
             rect.left_bottom() + vec2(0.0, 12.0),
@@ -117,15 +119,22 @@ fn header(ui: &mut Ui, model: &Model, page: &Page, nav: &mut Option<Page>) {
     p.circle_filled(pill.left_center() + vec2(13.0, 0.0), 6.5, dot.gamma_multiply(0.18));
     p.galley(pill.left_center() + vec2(22.0, -galley.size().y / 2.0), galley, theme::TEXT_DIM);
 
-    // Segmented page switcher left of the pill.
+    // Segmented page switcher: left of the pill when everything fits in one row,
+    // otherwise on its own row below the title so nothing overlaps.
     let tabs = [("Dashboard", Page::Dashboard), ("Components", Page::Components), ("Settings", Page::Settings)];
     let font = theme::semibold(12.5);
     let widths: Vec<f32> = tabs.iter().map(|(t, _)| p.layout_no_wrap(t.to_string(), font.clone(), theme::TEXT).size().x + 28.0).collect();
     let total: f32 = widths.iter().sum::<f32>() + 6.0;
-    let bar = Rect::from_min_size(
-        egui::pos2(pill.left() - 14.0 - total, rect.center().y - 15.0),
-        vec2(total, 30.0),
-    );
+    let inline = title_width + 32.0 + total + 14.0 <= pill.left() - rect.left();
+    let machine_space = if model.machine.is_some() { 28.0 } else { 10.0 };
+
+    let bar = if inline {
+        Rect::from_min_size(egui::pos2(pill.left() - 14.0 - total, rect.center().y - 15.0), vec2(total, 30.0))
+    } else {
+        ui.add_space(machine_space - 2.0);
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+        Rect::from_min_size(row.min, vec2(total, 30.0))
+    };
     p.rect_filled(bar, CornerRadius::same(15), theme::SURFACE);
 
     let mut x = bar.left() + 3.0;
@@ -147,7 +156,7 @@ fn header(ui: &mut Ui, model: &Model, page: &Page, nav: &mut Option<Page>) {
         }
     }
 
-    ui.add_space(if model.machine.is_some() { 28.0 } else { 10.0 });
+    ui.add_space(if inline { machine_space } else { 6.0 });
 }
 
 // ---------------------------------------------------------------------------
