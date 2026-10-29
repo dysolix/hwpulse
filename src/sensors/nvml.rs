@@ -183,6 +183,7 @@ impl Gpu {
 
         Group {
             id: format!("nvml/{}", self.index),
+            order: super::order::GPU + self.index as u16,
             title: self.name.clone(),
             subtitle: if self.driver.is_empty() {
                 "NVIDIA".into()

@@ -18,6 +18,8 @@ pub const HISTORY_LEN: usize = 120;
 pub struct Model {
     pub groups: Vec<Group>,
     pub errors: Vec<String>,
+    /// E.g. the mainboard name, shown under the app title.
+    pub machine: Option<String>,
     /// Keyed by `"{group.id}/{reading.id}"`.
     pub history: HashMap<String, VecDeque<f32>>,
 }
@@ -33,10 +35,15 @@ pub fn spawn(ctx: egui::Context) -> Shared {
         .spawn(move || {
             // Providers are created on this thread so they never need to be `Send`.
             let (mut providers, errors) = sensors::create_providers();
-            model.lock().unwrap().errors = errors;
+            {
+                let mut m = model.lock().unwrap();
+                m.errors = errors;
+                m.machine = providers.iter().find_map(|p| p.machine());
+            }
 
             loop {
-                let groups: Vec<Group> = providers.iter_mut().flat_map(|p| p.poll()).collect();
+                let mut groups: Vec<Group> = providers.iter_mut().flat_map(|p| p.poll()).collect();
+                groups.sort_by_key(|g| g.order);
                 {
                     let mut m = model.lock().unwrap();
                     for g in &groups {

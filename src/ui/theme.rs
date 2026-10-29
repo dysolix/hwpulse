@@ -28,6 +28,8 @@ pub fn accent(unit: Unit, value: f64) -> Color32 {
         Unit::Watts => Color32::from_rgb(0xF5, 0xB8, 0x3D),
         Unit::Megahertz => Color32::from_rgb(0x4F, 0xD1, 0xC5),
         Unit::Mebibytes => Color32::from_rgb(0xC0, 0x84, 0xFC),
+        Unit::BytesPerSec => Color32::from_rgb(0x5C, 0xC8, 0xFF),
+        Unit::BitsPerSec => Color32::from_rgb(0xF4, 0x72, 0xB6),
     }
 }
 

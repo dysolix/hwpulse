@@ -10,7 +10,7 @@ use eframe::egui::{
 
 use super::theme;
 use crate::poller::HISTORY_LEN;
-use crate::sensors::Reading;
+use crate::sensors::{Reading, Unit};
 
 pub const FEATURED_HEIGHT: f32 = 252.0;
 pub const STAT_HEIGHT: f32 = 128.0;
@@ -80,21 +80,23 @@ pub fn stat_card(ui: &mut Ui, reading: &Reading, history: Option<&VecDeque<f32>>
     );
     painter.circle_filled(pos2(inner.right() - 3.0, inner.top() + 6.0), 3.0, color);
 
-    value_text(&painter, inner.left_top() + vec2(0.0, 22.0), reading, 25.0, 12.5, Align2::LEFT_TOP);
+    let value = value_text(&painter, inner.left_top() + vec2(0.0, 22.0), reading, 25.0, 12.5, Align2::LEFT_TOP);
 
     if let Some(detail) = &reading.detail {
-        painter.text(
-            pos2(inner.right(), inner.top() + 33.0),
-            Align2::RIGHT_CENTER,
-            detail,
-            theme::regular(12.0),
-            theme::TEXT_FAINT,
-        );
+        // Right of the value when there is room, otherwise tucked underneath it.
+        let galley = painter.layout_no_wrap(detail.clone(), theme::regular(12.0), theme::TEXT_FAINT);
+        let pos = if value.right() + 10.0 + galley.size().x <= inner.right() {
+            pos2(inner.right() - galley.size().x, inner.top() + 33.0 - galley.size().y / 2.0)
+        } else {
+            pos2(inner.left(), value.bottom() + 1.0)
+        };
+        painter.galley(pos, galley, theme::TEXT_FAINT);
     }
 
     let mut bottom = inner.bottom();
+    // Bars are not animated on purpose: with dozens of cards some bar changes every
+    // tick, which would keep the UI rendering at 60 fps almost permanently.
     if let Some(frac) = fraction(reading) {
-        let frac = animated(ui, reading.id, frac);
         let bar = Rect::from_min_max(pos2(inner.left(), bottom - 4.0), pos2(inner.right(), bottom));
         painter.rect_filled(bar, CornerRadius::same(2), theme::TRACK);
         if frac > 0.0 {
@@ -167,25 +169,32 @@ fn fraction(r: &Reading) -> Option<f32> {
     (hi > lo).then(|| ((r.value - lo) / (hi - lo)).clamp(0.0, 1.0) as f32)
 }
 
-fn format_value(r: &Reading) -> String {
+/// Value and unit as displayed, scaled to a readable magnitude.
+fn display(r: &Reading) -> (String, &'static str) {
+    let v = r.value;
     match r.unit {
-        crate::sensors::Unit::Mebibytes if r.value >= 1024.0 => format!("{:.1}", r.value / 1024.0),
-        crate::sensors::Unit::Watts if r.value < 100.0 => format!("{:.1}", r.value),
-        _ => format!("{:.0}", r.value),
+        Unit::Celsius => (format!("{v:.0}"), "°C"),
+        Unit::Percent => (format!("{v:.0}"), "%"),
+        Unit::Watts if v < 100.0 => (format!("{v:.1}"), "W"),
+        Unit::Watts => (format!("{v:.0}"), "W"),
+        Unit::Megahertz if v >= 1000.0 => (format!("{:.2}", v / 1000.0), "GHz"),
+        Unit::Megahertz => (format!("{v:.0}"), "MHz"),
+        Unit::Mebibytes if v >= 1024.0 => (format!("{:.1}", v / 1024.0), "GB"),
+        Unit::Mebibytes => (format!("{v:.0}"), "MB"),
+        Unit::BytesPerSec if v >= 1024.0 * 1024.0 * 1024.0 => (format!("{:.2}", v / 1024f64.powi(3)), "GB/s"),
+        Unit::BytesPerSec if v >= 1024.0 * 1024.0 => (format!("{:.1}", v / 1024f64.powi(2)), "MB/s"),
+        Unit::BytesPerSec => (format!("{:.0}", v / 1024.0), "KB/s"),
+        Unit::BitsPerSec if v >= 1e9 => (format!("{:.2}", v / 1e9), "Gbps"),
+        Unit::BitsPerSec if v >= 1e6 => (format!("{:.1}", v / 1e6), "Mbps"),
+        Unit::BitsPerSec => (format!("{:.0}", v / 1e3), "Kbps"),
     }
 }
 
-fn unit_suffix(r: &Reading) -> &'static str {
-    match r.unit {
-        crate::sensors::Unit::Mebibytes if r.value >= 1024.0 => "GB",
-        u => u.suffix(),
-    }
-}
-
-/// Big number with a smaller unit suffix, positioned as one block.
-fn value_text(painter: &egui::Painter, anchor: Pos2, r: &Reading, size: f32, unit_size: f32, align: Align2) {
-    let value = painter.layout_no_wrap(format_value(r), theme::semibold(size), theme::TEXT);
-    let unit = painter.layout_no_wrap(unit_suffix(r).to_owned(), theme::regular(unit_size), theme::TEXT_DIM);
+/// Big number with a smaller unit suffix, positioned as one block. Returns its rect.
+fn value_text(painter: &egui::Painter, anchor: Pos2, r: &Reading, size: f32, unit_size: f32, align: Align2) -> Rect {
+    let (value, unit) = display(r);
+    let value = painter.layout_no_wrap(value, theme::semibold(size), theme::TEXT);
+    let unit = painter.layout_no_wrap(unit.to_owned(), theme::regular(unit_size), theme::TEXT_DIM);
     let gap = 3.0;
     let total = vec2(value.size().x + gap + unit.size().x, value.size().y);
     let block = align.anchor_size(anchor, total);
@@ -197,6 +206,7 @@ fn value_text(painter: &egui::Painter, anchor: Pos2, r: &Reading, size: f32, uni
         block.min.y + value.size().y * 0.78 - unit.size().y * 0.78,
     );
     painter.galley(unit_pos, unit, theme::TEXT_DIM);
+    block
 }
 
 fn arc(painter: &egui::Painter, center: Pos2, radius: f32, start: f32, sweep: f32, stroke: Stroke) {
@@ -221,11 +231,11 @@ fn sparkline(painter: &egui::Painter, rect: Rect, values: &VecDeque<f32>, range:
     }
     let (lo, hi) = match range {
         Some((lo, hi)) => (lo as f32, hi as f32),
+        // Unbounded values (throughput, clocks) scale from zero to the recent peak.
         None => {
-            let min = values.iter().copied().fold(f32::INFINITY, f32::min);
+            let min = values.iter().copied().fold(0.0, f32::min);
             let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let pad = ((max - min) * 0.15).max(1.0);
-            (min - pad, max + pad)
+            (min, (max * 1.15).max(min + 1.0))
         }
     };
     let step = rect.width() / (HISTORY_LEN - 1) as f32;

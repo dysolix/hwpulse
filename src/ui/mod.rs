@@ -36,10 +36,7 @@ impl eframe::App for App {
                     if model.groups.is_empty() && model.errors.is_empty() {
                         ui.label(egui::RichText::new("Waiting for sensors…").color(theme::TEXT_DIM));
                     }
-                    for group in &model.groups {
-                        group_section(ui, group, &model);
-                        ui.add_space(14.0);
-                    }
+                    groups(ui, &model);
                     footer(ui);
                 });
             });
@@ -50,6 +47,15 @@ fn header(ui: &mut Ui, model: &Model) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::hover());
     let p = ui.painter();
     p.text(rect.left_center(), Align2::LEFT_CENTER, "Hardware Monitor", theme::semibold(22.0), theme::TEXT);
+    if let Some(machine) = &model.machine {
+        p.text(
+            rect.left_bottom() + vec2(0.0, 12.0),
+            Align2::LEFT_CENTER,
+            machine,
+            theme::regular(12.5),
+            theme::TEXT_FAINT,
+        );
+    }
 
     // "Live" pill on the right.
     let live = !model.groups.is_empty();
@@ -62,8 +68,49 @@ fn header(ui: &mut Ui, model: &Model) {
     p.circle_filled(pill.left_center() + vec2(13.0, 0.0), 6.5, dot.gamma_multiply(0.18));
     p.galley(pill.left_center() + vec2(22.0, -galley.size().y / 2.0), galley, theme::TEXT_DIM);
 
-    ui.add_space(10.0);
+    ui.add_space(if model.machine.is_some() { 28.0 } else { 10.0 });
 }
+
+/// One column on narrow windows; two balanced columns once there is room.
+fn groups(ui: &mut Ui, model: &Model) {
+    const TWO_COLUMNS_FROM: f32 = 1000.0;
+
+    if ui.available_width() < TWO_COLUMNS_FROM {
+        for group in &model.groups {
+            group_section(ui, group, model);
+        }
+        return;
+    }
+
+    // Greedily place each group (in order) into the currently shorter column.
+    let mut columns: [Vec<&Group>; 2] = Default::default();
+    let mut heights = [0.0f32; 2];
+    for group in &model.groups {
+        let col = if heights[0] <= heights[1] { 0 } else { 1 };
+        heights[col] += estimated_height(group);
+        columns[col].push(group);
+    }
+
+    ui.columns(2, |cols| {
+        for (ui, groups) in cols.iter_mut().zip(&columns) {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            for group in groups {
+                group_section(ui, group, model);
+            }
+        }
+    });
+}
+
+fn estimated_height(group: &Group) -> f32 {
+    const HEADER: f32 = 60.0;
+    let featured = group.readings.iter().any(|r| r.featured);
+    let stat_rows = group.readings.iter().filter(|r| !r.featured).count().div_ceil(STATS_PER_ROW);
+    HEADER
+        + if featured { widgets::FEATURED_HEIGHT + 12.0 } else { 0.0 }
+        + stat_rows as f32 * (widgets::STAT_HEIGHT + 12.0)
+}
+
+const STATS_PER_ROW: usize = 3;
 
 fn group_section(ui: &mut Ui, group: &Group, model: &Model) {
     ui.add_space(4.0);
@@ -83,15 +130,15 @@ fn group_section(ui: &mut Ui, group: &Group, model: &Model) {
         });
     }
 
-    const PER_ROW: usize = 3;
     let stats: Vec<_> = group.readings.iter().filter(|r| !r.featured).collect();
-    for row in stats.chunks(PER_ROW) {
-        ui.columns(PER_ROW, |cols| {
+    for row in stats.chunks(STATS_PER_ROW) {
+        ui.columns(STATS_PER_ROW, |cols| {
             for (col, r) in cols.iter_mut().zip(row) {
                 widgets::stat_card(col, r, history(r.id));
             }
         });
     }
+    ui.add_space(14.0);
 }
 
 fn footer(ui: &mut Ui) {

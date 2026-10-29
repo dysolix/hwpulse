@@ -11,7 +11,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Hardware Monitor")
-            .with_inner_size([660.0, 910.0])
+            .with_inner_size([1180.0, 940.0])
             .with_min_inner_size([520.0, 420.0]),
         ..Default::default()
     };
