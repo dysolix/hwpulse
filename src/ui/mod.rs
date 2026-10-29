@@ -8,6 +8,7 @@ use eframe::egui::{
     ScrollArea, Sense, Ui, vec2,
 };
 
+use crate::autostart;
 use crate::poller::{self, Model, Shared};
 use crate::sensors::Group;
 use crate::settings::{self, Settings};
@@ -27,8 +28,8 @@ pub struct App {
     page: Page,
     settings: Settings,
     performance: performance::State,
-    /// Whether hwmon starts with Windows; read from the registry once at startup.
-    autostart: bool,
+    /// Whether this copy starts with Windows; checked (and repaired) at startup.
+    autostart: autostart::State,
 }
 
 impl App {
@@ -41,7 +42,7 @@ impl App {
             page: Page::Dashboard,
             settings,
             performance: Default::default(),
-            autostart: crate::autostart::enabled(),
+            autostart: autostart::check(),
         }
     }
 }
@@ -534,7 +535,7 @@ fn components(ui: &mut Ui, model: &Model, nav: &mut Option<Page>) {
 // Settings
 
 /// One section per topic; add new sections below the dashboard one.
-fn settings_page(ui: &mut Ui, model: &Model, settings: &mut Settings, autostart: &mut bool) {
+fn settings_page(ui: &mut Ui, model: &Model, settings: &mut Settings, autostart: &mut autostart::State) {
     ui.add_space(4.0);
     ui.label(egui::RichText::new("Settings").font(theme::semibold(18.0)).color(theme::TEXT));
     ui.add_space(-8.0);
@@ -560,13 +561,20 @@ fn chart_settings(ui: &mut Ui, settings: &mut Settings) {
     ui.add_space(14.0);
 }
 
-/// `autostart` mirrors the registry; it is re-read if writing fails.
-fn startup_settings(ui: &mut Ui, autostart: &mut bool) {
+/// `autostart` mirrors the registry and is re-read after every change.
+fn startup_settings(ui: &mut Ui, autostart: &mut autostart::State) {
     section_heading(ui, "Startup", "Stored in Windows, so it matches the choice made in the installer.");
     ui.add_space(6.0);
-    if switch_card(ui, "Start with Windows", "Open hwmon when you sign in.", *autostart) {
-        let _ = crate::autostart::set(!*autostart);
-        *autostart = crate::autostart::enabled();
+    let description = match autostart {
+        autostart::State::OtherCopy(path) => {
+            format!("Another copy starts with Windows ({}). Switch on to start this one instead.", path.display())
+        }
+        _ => "Open hwmon when you sign in.".to_owned(),
+    };
+    let on = *autostart == autostart::State::On;
+    if switch_card(ui, "Start with Windows", &description, on) {
+        let _ = autostart::set(!on);
+        *autostart = autostart::check();
     }
     ui.add_space(14.0);
 }
