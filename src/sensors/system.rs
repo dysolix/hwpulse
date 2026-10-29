@@ -122,7 +122,7 @@ impl SystemProvider {
             title: inv.cpu_name.clone().unwrap_or_else(|| "Processor".into()),
             subtitle: inv.cpu_topology.clone().unwrap_or_default(),
             readings,
-            breakdown: (!threads.is_empty()).then(|| Breakdown {
+            breakdown: (!threads.is_empty()).then_some(Breakdown {
                 title: "Threads",
                 subtitle: "Load and effective clock per logical processor",
                 unit: Unit::Percent,
@@ -361,7 +361,8 @@ fn throughput(id: &'static str, label: &'static str, value: f64, unit: Unit, ran
 }
 
 fn is_virtual_adapter(name: &str) -> bool {
-    const SKIP: [&str; 8] = ["vEthernet", "Hyper-V", "Virtual", "Loopback", "isatap", "Teredo", "WAN Miniport", "Bluetooth"];
+    const SKIP: [&str; 8] =
+        ["vEthernet", "Hyper-V", "Virtual", "Loopback", "isatap", "Teredo", "WAN Miniport", "Bluetooth"];
     SKIP.iter().any(|s| name.to_lowercase().contains(&s.to_lowercase()))
 }
 
@@ -399,7 +400,8 @@ struct DiskInfo {
 impl DiskInfo {
     /// E.g. "NVMe SSD", "SATA HDD", "External · USB".
     fn type_label(&self) -> Option<String> {
-        let parts: Vec<&str> = [self.external.then_some("External"), self.bus, self.media].into_iter().flatten().collect();
+        let parts: Vec<&str> =
+            [self.external.then_some("External"), self.bus, self.media].into_iter().flatten().collect();
         if parts.is_empty() {
             return None;
         }
@@ -513,10 +515,7 @@ fn load_disks(wmi: &wmi::WMIConnection) -> HashMap<u32, DiskInfo> {
                 model = format!("Seagate {model}");
             }
             // Serials come padded ("    WW60QK2F") or with a trailing dot (NVMe EUI).
-            let serial = d
-                .serial_number
-                .map(|s| s.trim().trim_end_matches('.').to_string())
-                .filter(|s| !s.is_empty());
+            let serial = d.serial_number.map(|s| s.trim().trim_end_matches('.').to_string()).filter(|s| !s.is_empty());
             let (bus, media) = types.remove(&d.index).unwrap_or_default();
             (d.index, DiskInfo { model, size: d.size, serial, external, bus, media })
         })

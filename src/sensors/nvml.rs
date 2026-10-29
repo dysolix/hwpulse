@@ -3,8 +3,8 @@
 
 use nvml_wrapper::Device;
 use nvml_wrapper::Nvml;
-use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
+use nvml_wrapper::error::NvmlError;
 
 use super::{Group, Kind, Reading, SensorProvider, Unit};
 

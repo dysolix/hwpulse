@@ -1,0 +1,38 @@
+# Formatting, lints and tests. Runs on pull requests and by hand; Windows minutes
+# count twice against the private repo's allowance, so not on every push.
+# To run it on pushes too, add:  push: { branches: [master], paths: ['src/**', 'Cargo.*', 'build.rs'] }
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    # Formatting needs no build, so it runs on the cheaper Linux runner.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  clippy-test:
+    # Windows-only APIs and rc.exe in build.rs: lints and tests need Windows.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test

@@ -26,7 +26,8 @@ pub fn style_title_bar(window: &impl HasWindowHandle) {
 }
 
 fn set<T>(hwnd: HWND, attribute: DWMWINDOWATTRIBUTE, value: &T) {
-    let _ = unsafe { DwmSetWindowAttribute(hwnd, attribute, value as *const T as *const c_void, size_of::<T>() as u32) };
+    let _ =
+        unsafe { DwmSetWindowAttribute(hwnd, attribute, value as *const T as *const c_void, size_of::<T>() as u32) };
 }
 
 fn colorref(c: Color32) -> COLORREF {
@@ -68,11 +69,7 @@ fn render_icon(size: u32) -> Vec<u8> {
             if angle <= sweep + 0.15 {
                 let t = (angle / sweep).min(1.0);
                 let end_fade = coverage((angle - sweep) * radius);
-                let ring = if t <= filled {
-                    theme::heat(35.0 + 55.0 * (t / filled) as f64)
-                } else {
-                    theme::TRACK
-                };
+                let ring = if t <= filled { theme::heat(35.0 + 55.0 * (t / filled) as f64) } else { theme::TRACK };
                 color = blend(color, ring, coverage(ring_dist) * end_fade * tile_alpha);
             }
 

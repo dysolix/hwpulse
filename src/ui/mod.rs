@@ -72,36 +72,34 @@ impl eframe::App for App {
             nav = Some(Page::Components);
         }
 
-        CentralPanel::default()
-            .frame(Frame::new().fill(theme::BG).inner_margin(Margin::same(22)))
-            .show(ui, |ui| {
-                header(ui, &model, page, &mut nav);
-                if *page == Page::Performance {
-                    // Two independently scrolling panes instead of one page scroll.
-                    performance::page(ui, &model, settings, performance);
-                    return;
+        CentralPanel::default().frame(Frame::new().fill(theme::BG).inner_margin(Margin::same(22))).show(ui, |ui| {
+            header(ui, &model, page, &mut nav);
+            if *page == Page::Performance {
+                // Two independently scrolling panes instead of one page scroll.
+                performance::page(ui, &model, settings, performance);
+                return;
+            }
+            let viewport_height = ui.available_height();
+            ScrollArea::vertical().id_salt(format!("{page:?}")).auto_shrink(false).show(ui, |ui| {
+                let content_top = ui.cursor().top();
+                for error in &model.errors {
+                    ui.label(egui::RichText::new(error).color(theme::ERROR).font(theme::regular(13.0)));
                 }
-                let viewport_height = ui.available_height();
-                ScrollArea::vertical().id_salt(format!("{page:?}")).auto_shrink(false).show(ui, |ui| {
-                    let content_top = ui.cursor().top();
-                    for error in &model.errors {
-                        ui.label(egui::RichText::new(error).color(theme::ERROR).font(theme::regular(13.0)));
+                if model.groups.is_empty() && model.errors.is_empty() {
+                    ui.label(egui::RichText::new("Waiting for sensors…").color(theme::TEXT_DIM));
+                }
+                match page {
+                    Page::Dashboard => {
+                        dashboard(ui, &model, settings, &mut nav);
+                        footer(ui, viewport_height - (ui.cursor().top() - content_top));
                     }
-                    if model.groups.is_empty() && model.errors.is_empty() {
-                        ui.label(egui::RichText::new("Waiting for sensors…").color(theme::TEXT_DIM));
-                    }
-                    match page {
-                        Page::Dashboard => {
-                            dashboard(ui, &model, settings, &mut nav);
-                            footer(ui, viewport_height - (ui.cursor().top() - content_top));
-                        }
-                        Page::Components => components(ui, &model, &mut nav),
-                        Page::Component(id) => detail(ui, &model, id, &mut nav),
-                        Page::Settings => settings_page(ui, &model, settings, autostart),
-                        Page::Performance => {}
-                    }
-                });
+                    Page::Components => components(ui, &model, &mut nav),
+                    Page::Component(id) => detail(ui, &model, id, &mut nav),
+                    Page::Settings => settings_page(ui, &model, settings, autostart),
+                    Page::Performance => {}
+                }
             });
+        });
 
         drop(model);
         if let Some(next) = nav {
@@ -150,7 +148,8 @@ fn header(ui: &mut Ui, model: &Model, page: &Page, nav: &mut Option<Page>) {
         ("Settings", Page::Settings),
     ];
     let font = theme::semibold(12.5);
-    let widths: Vec<f32> = tabs.iter().map(|(t, _)| p.layout_no_wrap(t.to_string(), font.clone(), theme::TEXT).size().x + 28.0).collect();
+    let widths: Vec<f32> =
+        tabs.iter().map(|(t, _)| p.layout_no_wrap(t.to_string(), font.clone(), theme::TEXT).size().x + 28.0).collect();
     let total: f32 = widths.iter().sum::<f32>() + 6.0;
     let inline = title_width + 32.0 + total + 14.0 <= pill.left() - rect.left();
     let machine_space = if model.machine.is_some() { 28.0 } else { 10.0 };
@@ -168,7 +167,8 @@ fn header(ui: &mut Ui, model: &Model, page: &Page, nav: &mut Option<Page>) {
     for ((title, target), w) in tabs.into_iter().zip(widths) {
         let tab = Rect::from_min_size(egui::pos2(x, bar.top() + 3.0), vec2(w, 24.0));
         x += w;
-        let response = ui.interact(tab, ui.scope_id().with(title), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+        let response =
+            ui.interact(tab, ui.scope_id().with(title), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
         let active = match (&target, page) {
             (Page::Components, Page::Component(_)) => true,
             (a, b) => a == b,
@@ -300,9 +300,7 @@ fn dashboard(ui: &mut Ui, model: &Model, settings: &mut Settings, nav: &mut Opti
             }
         }
         (order, layout) = (best.0, best.1);
-        ctx.data_mut(|data| {
-            data.insert_temp(state_id, SectionDrag { id: group.id.clone(), insert: best_k, grab })
-        });
+        ctx.data_mut(|data| data.insert_temp(state_id, SectionDrag { id: group.id.clone(), insert: best_k, grab }));
         lifted = Some((group, float_pos));
     } else if !released && state.is_some() {
         ctx.data_mut(|d| d.remove::<SectionDrag>(state_id));
@@ -353,7 +351,12 @@ fn dashboard(ui: &mut Ui, model: &Model, settings: &mut Settings, nav: &mut Opti
                 .stroke(egui::Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.6)))
                 .corner_radius(CornerRadius::same(theme::CARD_RADIUS + 4))
                 .inner_margin(Margin::same(LIFT_PAD as i8))
-                .shadow(egui::Shadow { offset: [0, 16], blur: 40, spread: 0, color: egui::Color32::from_black_alpha(170) })
+                .shadow(egui::Shadow {
+                    offset: [0, 16],
+                    blur: 40,
+                    spread: 0,
+                    color: egui::Color32::from_black_alpha(170),
+                })
                 .show(ui, |ui| {
                     ui.set_width(rect.width());
                     let mut no_nav = None;
@@ -439,14 +442,7 @@ fn section_height(group: &Group) -> f32 {
 
 /// One dashboard section. The header doubles as drag handle (`drag_id`) for
 /// reordering; the title itself is a link to the component's detail page.
-fn group_section(
-    ui: &mut Ui,
-    group: &Group,
-    model: &Model,
-    nav: &mut Option<Page>,
-    stretch: f32,
-    drag_id: egui::Id,
-) {
+fn group_section(ui: &mut Ui, group: &Group, model: &Model, nav: &mut Option<Page>, stretch: f32, drag_id: egui::Id) {
     // Fixed-height header so `section_height` stays exact.
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), SECTION_HEADER), Sense::hover());
     let handle = ui.interact(rect, drag_id, Sense::drag());
@@ -468,9 +464,8 @@ fn group_section(
     }
     let title = p.layout_no_wrap(format!("{}  ›", group.title), theme::semibold(16.0), theme::TEXT);
     let title_rect = Rect::from_min_size(rect.left_top() + vec2(0.0, 4.0), title.size());
-    let response = ui
-        .interact(title_rect, drag_id.with("title"), Sense::click())
-        .on_hover_cursor(CursorIcon::PointingHand);
+    let response =
+        ui.interact(title_rect, drag_id.with("title"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
     let color = if response.hovered() { theme::ACCENT } else { theme::TEXT };
     p.galley_with_override_text_color(title_rect.min, title, color);
     p.text(
@@ -655,10 +650,7 @@ fn dashboard_settings(ui: &mut Ui, model: &Model, settings: &mut Settings) {
 }
 
 fn dashboard_list(ui: &mut Ui, model: &Model, settings: &mut Settings) {
-    let resets = [
-        (!settings.visibility_is_default(), "Reset to default"),
-        (!settings.order.is_empty(), "Reset order"),
-    ];
+    let resets = [(!settings.visibility_is_default(), "Reset to default"), (!settings.order.is_empty(), "Reset order")];
     if resets.iter().any(|(show, _)| *show) {
         ui.add_space(-4.0);
         ui.horizontal(|ui| {
@@ -840,45 +832,50 @@ fn settings_card(ui: &mut Ui, group: &Group, settings: &mut Settings, handle_id:
         .corner_radius(CornerRadius::same(theme::CARD_RADIUS))
         .inner_margin(Margin::symmetric(20, 16));
     if lifted {
-        frame = frame.shadow(egui::Shadow { offset: [0, 12], blur: 32, spread: 0, color: egui::Color32::from_black_alpha(150) });
+        frame = frame.shadow(egui::Shadow {
+            offset: [0, 12],
+            blur: 32,
+            spread: 0,
+            color: egui::Color32::from_black_alpha(150),
+        });
     }
 
     frame
         .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    widgets::drag_handle(ui, handle_id);
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 2.0;
-                        ui.label(
-                            egui::RichText::new(group.kind.label().to_uppercase())
-                                .font(theme::semibold(10.5))
-                                .color(if visible { color } else { theme::TEXT_FAINT }),
-                        );
-                        ui.label(
-                            egui::RichText::new(&group.title)
-                                .font(theme::semibold(15.0))
-                                .color(if visible { theme::TEXT } else { theme::TEXT_DIM }),
-                        );
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if widgets::toggle(ui, visible).clicked() {
-                            settings.toggle_group(group);
-                        }
-                    });
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                widgets::drag_handle(ui, handle_id);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(
+                        egui::RichText::new(group.kind.label().to_uppercase())
+                            .font(theme::semibold(10.5))
+                            .color(if visible { color } else { theme::TEXT_FAINT }),
+                    );
+                    ui.label(egui::RichText::new(&group.title).font(theme::semibold(15.0)).color(if visible {
+                        theme::TEXT
+                    } else {
+                        theme::TEXT_DIM
+                    }));
                 });
-
-                ui.add_space(8.0);
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-                    for r in &group.readings {
-                        let on = settings.reading_visible(&group.id, r.id);
-                        if widgets::chip(ui, r.label, on, visible, color).clicked() {
-                            settings.toggle_reading(&group.id, r.id);
-                        }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if widgets::toggle(ui, visible).clicked() {
+                        settings.toggle_group(group);
                     }
                 });
-            })
+            });
+
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                for r in &group.readings {
+                    let on = settings.reading_visible(&group.id, r.id);
+                    if widgets::chip(ui, r.label, on, visible, color).clicked() {
+                        settings.toggle_reading(&group.id, r.id);
+                    }
+                }
+            });
+        })
         .response
         .rect
 }
@@ -937,7 +934,7 @@ fn detail(ui: &mut Ui, model: &Model, id: &str, nav: &mut Option<Page>) {
 fn grid_columns(width: f32, items: usize) -> usize {
     const MIN_CELL: f32 = 128.0;
     let max = ((width / MIN_CELL) as usize).clamp(2, 8).min(items.max(1));
-    (2..=max).rev().find(|c| items % c == 0).unwrap_or(max)
+    (2..=max).rev().find(|c| items.is_multiple_of(*c)).unwrap_or(max)
 }
 
 // ---------------------------------------------------------------------------

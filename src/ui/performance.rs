@@ -134,7 +134,13 @@ fn details(ui: &mut Ui, group: &Group, model: &Model, state: &mut State, view_he
                 ui.columns(per_row, |cols| {
                     for (col, item) in cols.iter_mut().zip(row) {
                         let history = model.history.get(&format!("{}/#{}", group.id, item.label));
-                        let s = widgets::Series { label: &item.label, history, value: item.value, unit: b.unit, dashed: false };
+                        let s = widgets::Series {
+                            label: &item.label,
+                            history,
+                            value: item.value,
+                            unit: b.unit,
+                            dashed: false,
+                        };
                         widgets::chart(col, cell, &item.label, &[s], b.range, color, true);
                     }
                 });
@@ -176,7 +182,8 @@ fn values(ui: &mut Ui, group: &Group) {
     for (i, r) in group.readings.iter().enumerate() {
         let origin = rect.min + vec2((i % per_row) as f32 * column, (i / per_row) as f32 * HEIGHT + 8.0);
         painter.text(origin, Align2::LEFT_TOP, r.label, theme::regular(12.0), theme::TEXT_DIM);
-        let value = widgets::value_text(&painter, origin + vec2(0.0, 17.0), (r.value, r.unit), 24.0, 12.5, Align2::LEFT_TOP);
+        let value =
+            widgets::value_text(&painter, origin + vec2(0.0, 17.0), (r.value, r.unit), 24.0, 12.5, Align2::LEFT_TOP);
         if let Some(detail) = &r.detail {
             let galley = widgets::elided(&painter, detail, theme::regular(11.5), theme::TEXT_FAINT, column - 12.0);
             painter.galley(pos2(origin.x, value.bottom() + 1.0), galley, theme::TEXT_FAINT);
@@ -207,7 +214,8 @@ fn segmented(ui: &mut Ui, bar: Rect, options: &[&str], selected: usize) -> Optio
     for (i, (title, w)) in options.iter().zip(widths).enumerate() {
         let tab = Rect::from_min_size(pos2(x, bar.top() + 3.0), vec2(w, 24.0));
         x += w;
-        let response = ui.interact(tab, ui.scope_id().with(("view", i)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+        let response =
+            ui.interact(tab, ui.scope_id().with(("view", i)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
         if i == selected {
             painter.rect_filled(tab, CornerRadius::same(12), theme::RAISED);
         }
@@ -302,12 +310,9 @@ fn summary(group: &Group) -> String {
             .zip(["↓", "↑"])
             .map(|(r, arrow)| format!("{arrow} {}", fmt(r)))
             .collect(),
-        Kind::Disk | Kind::ExternalDisk => ["active", "read", "write"]
-            .iter()
-            .filter_map(|id| get(id))
-            .take(1)
-            .map(fmt)
-            .collect(),
+        Kind::Disk | Kind::ExternalDisk => {
+            ["active", "read", "write"].iter().filter_map(|id| get(id)).take(1).map(fmt).collect()
+        }
     };
     parts.join(" · ")
 }

@@ -202,10 +202,8 @@ mod tests {
 
     #[test]
     fn unplugged_component_keeps_its_place_when_reordering() {
-        let mut s = Settings {
-            order: vec!["cpu".into(), "usb".into(), "disk1".into(), "net".into()],
-            ..Default::default()
-        };
+        let mut s =
+            Settings { order: vec!["cpu".into(), "usb".into(), "disk1".into(), "net".into()], ..Default::default() };
         // usb is unplugged while net is moved to the top.
         let connected = groups(&["cpu", "disk1", "net"]);
         s.reorder(&s.ordered(&connected), 2, 0);

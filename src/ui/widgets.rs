@@ -178,7 +178,13 @@ pub fn component_row(ui: &mut Ui, group: &Group) -> egui::Response {
         theme::semibold(10.5),
         kind_color,
     );
-    painter.text(pos2(inner.left(), rect.top() + 41.0), Align2::LEFT_CENTER, &group.title, theme::semibold(15.0), theme::TEXT);
+    painter.text(
+        pos2(inner.left(), rect.top() + 41.0),
+        Align2::LEFT_CENTER,
+        &group.title,
+        theme::semibold(15.0),
+        theme::TEXT,
+    );
     painter.text(
         pos2(inner.left(), rect.top() + 60.0),
         Align2::LEFT_CENTER,
@@ -200,14 +206,21 @@ pub fn component_row(ui: &mut Ui, group: &Group) -> egui::Response {
         .take(3)
         .collect();
     // Leave the name room on narrow windows: drop values that would overlap it.
-    let title_right = inner.left() + painter.layout_no_wrap(group.title.clone(), theme::semibold(15.0), theme::TEXT).size().x;
+    let title_right =
+        inner.left() + painter.layout_no_wrap(group.title.clone(), theme::semibold(15.0), theme::TEXT).size().x;
     let mut right = inner.right() - 30.0;
     for r in key.iter().rev() {
         let left = right - COLUMN;
         if left < title_right + 24.0 {
             break;
         }
-        painter.text(pos2(right, rect.top() + 26.0), Align2::RIGHT_CENTER, r.label.to_uppercase(), theme::semibold(10.0), theme::TEXT_FAINT);
+        painter.text(
+            pos2(right, rect.top() + 26.0),
+            Align2::RIGHT_CENTER,
+            r.label.to_uppercase(),
+            theme::semibold(10.0),
+            theme::TEXT_FAINT,
+        );
         value_text(&painter, pos2(right, rect.top() + 48.0), (r.value, r.unit), 18.0, 11.0, Align2::RIGHT_CENTER);
         right = left;
     }
@@ -278,7 +291,11 @@ pub fn chip(ui: &mut Ui, label: &str, on: bool, enabled: bool, color: Color32) -
         painter.circle_stroke(dot, 3.5, Stroke::new(1.2, dim(theme::TEXT_FAINT)));
     }
     let text = if on { theme::TEXT } else { theme::TEXT_DIM };
-    painter.galley_with_override_text_color(pos2(rect.left() + 27.0, rect.center().y - galley.size().y / 2.0), galley, dim(text));
+    painter.galley_with_override_text_color(
+        pos2(rect.left() + 27.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        dim(text),
+    );
     response
 }
 
@@ -314,9 +331,8 @@ fn animated(ui: &Ui, key: &str, target: f32) -> f32 {
         (a.from + (a.to - a.from) * (1.0 - (1.0 - t).powi(3)), t)
     };
 
-    let mut anim = ctx.data_mut(|d| {
-        *d.get_temp_mut_or(id, Anim { from: target, to: target, start: f64::NEG_INFINITY })
-    });
+    let mut anim =
+        ctx.data_mut(|d| *d.get_temp_mut_or(id, Anim { from: target, to: target, start: f64::NEG_INFINITY }));
     if anim.to != target {
         // Start from wherever the running animation currently is. Sub-pixel changes
         // (noise in power/load readings) snap instead of costing ~100 repaints.
@@ -387,10 +403,7 @@ pub fn value_text(
 
     painter.galley(block.min, value.clone(), theme::TEXT);
     // Align unit baseline roughly with the number's baseline.
-    let unit_pos = pos2(
-        block.min.x + value.size().x + gap,
-        block.min.y + value.size().y * 0.78 - unit.size().y * 0.78,
-    );
+    let unit_pos = pos2(block.min.x + value.size().x + gap, block.min.y + value.size().y * 0.78 - unit.size().y * 0.78);
     painter.galley(unit_pos, unit, theme::TEXT_DIM);
     block
 }
@@ -538,11 +551,24 @@ pub fn chart(
     let (line_lo, line_hi) = smooth_bounds(ui, title, (lo, hi));
 
     // Header: title and legend on the left, scale or current value on the right.
-    let title = painter.text(inner.left_top(), Align2::LEFT_TOP, title.to_uppercase(), theme::semibold(11.0), theme::TEXT_DIM);
+    let title =
+        painter.text(inner.left_top(), Align2::LEFT_TOP, title.to_uppercase(), theme::semibold(11.0), theme::TEXT_DIM);
     let corner = if compact {
-        painter.text(inner.right_top(), Align2::RIGHT_TOP, format_value(first.value, first.unit), theme::semibold(12.5), theme::TEXT)
+        painter.text(
+            inner.right_top(),
+            Align2::RIGHT_TOP,
+            format_value(first.value, first.unit),
+            theme::semibold(12.5),
+            theme::TEXT,
+        )
     } else {
-        painter.text(inner.right_top(), Align2::RIGHT_TOP, format_value(hi as f64, first.unit), theme::regular(11.0), theme::TEXT_FAINT)
+        painter.text(
+            inner.right_top(),
+            Align2::RIGHT_TOP,
+            format_value(hi as f64, first.unit),
+            theme::regular(11.0),
+            theme::TEXT_FAINT,
+        )
     };
     if series.len() > 1 {
         let mut x = title.right() + 16.0;
@@ -569,7 +595,7 @@ pub fn chart(
     grid(&painter, plot, if compact { (6, 2) } else { (12, 4) });
     if !compact {
         let span = HISTORY_LEN as u64 * crate::poller::INTERVAL.as_secs();
-        let span = if span % 60 == 0 { format!("{} minutes", span / 60) } else { format!("{span} seconds") };
+        let span = if span.is_multiple_of(60) { format!("{} minutes", span / 60) } else { format!("{span} seconds") };
         let y = plot.bottom() + 6.0;
         painter.text(pos2(plot.left(), y), Align2::LEFT_TOP, span, theme::regular(11.0), theme::TEXT_FAINT);
         let low = format_value(lo as f64, first.unit);
@@ -584,7 +610,8 @@ pub fn chart(
     // Hover readout. The marker stays on the sample slot under the pointer while the
     // line slides through it: the dots ride the line, while the text always shows
     // the sample that settles in this slot, so it changes once per update.
-    let Some(pointer) = ui.ctx().pointer_hover_pos().filter(|p| plot.contains(*p) && ui.rect_contains_pointer(rect)) else {
+    let Some(pointer) = ui.ctx().pointer_hover_pos().filter(|p| plot.contains(*p) && ui.rect_contains_pointer(rect))
+    else {
         return;
     };
     let step = plot.width() / (HISTORY_LEN - 1) as f32;
@@ -612,7 +639,8 @@ pub fn chart(
         return;
     }
     painter.line_segment([pos2(x, plot.top()), pos2(x, plot.bottom())], Stroke::new(1.0, theme::BORDER_HOVER));
-    let when = if ago == 0 { "now".to_owned() } else { format!("{} s ago", ago as u64 * crate::poller::INTERVAL.as_secs()) };
+    let when =
+        if ago == 0 { "now".to_owned() } else { format!("{} s ago", ago as u64 * crate::poller::INTERVAL.as_secs()) };
     let when = painter.layout_no_wrap(when, theme::regular(11.0), theme::TEXT_FAINT);
     let text = painter.layout_no_wrap(lines.join("\n"), theme::semibold(12.5), theme::TEXT);
     let size = vec2(text.size().x.max(when.size().x), when.size().y + 2.0 + text.size().y) + vec2(20.0, 14.0);
@@ -626,7 +654,13 @@ pub fn chart(
 
 /// Tiny framed chart without labels, for list rows.
 pub fn thumbnail(painter: &egui::Painter, rect: Rect, series: &[Series], range: Option<(f64, f64)>, color: Color32) {
-    painter.rect(rect, CornerRadius::same(5), theme::BG, Stroke::new(1.0, color.gamma_multiply(0.45)), StrokeKind::Inside);
+    painter.rect(
+        rect,
+        CornerRadius::same(5),
+        theme::BG,
+        Stroke::new(1.0, color.gamma_multiply(0.45)),
+        StrokeKind::Inside,
+    );
     let Some(first) = series.first() else { return };
     let bounds = bounds(extent(series.iter().filter_map(|s| s.history)), range, Some(first.unit));
     let plot = rect.shrink2(vec2(2.0, 3.0));
@@ -653,7 +687,14 @@ fn grid(painter: &egui::Painter, rect: Rect, (columns, rows): (usize, usize)) {
 ///
 /// Right after new samples arrive the line still sits one step further right and
 /// slides into place (see [`Timeline`]); the oldest sample slides out on the left.
-fn plot_line(painter: &egui::Painter, rect: Rect, values: &VecDeque<f32>, (lo, hi): (f32, f32), color: Color32, dashed: bool) {
+fn plot_line(
+    painter: &egui::Painter,
+    rect: Rect,
+    values: &VecDeque<f32>,
+    (lo, hi): (f32, f32),
+    color: Color32,
+    dashed: bool,
+) {
     let step = rect.width() / (HISTORY_LEN - 1) as f32;
     let shift = timeline(painter.ctx()).shift;
     if shift > 0.0 {
@@ -694,7 +735,13 @@ fn plot_line(painter: &egui::Painter, rect: Rect, values: &VecDeque<f32>, (lo, h
 }
 
 /// Single-line text cut off with "…" at `width`.
-pub fn elided(painter: &egui::Painter, text: &str, font: egui::FontId, color: Color32, width: f32) -> std::sync::Arc<egui::Galley> {
+pub fn elided(
+    painter: &egui::Painter,
+    text: &str,
+    font: egui::FontId,
+    color: Color32,
+    width: f32,
+) -> std::sync::Arc<egui::Galley> {
     let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
     job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(0.0));
     painter.layout_job(job)

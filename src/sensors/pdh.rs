@@ -42,7 +42,7 @@ impl Query {
     pub fn value(&self, counter: Counter) -> Option<f64> {
         let mut value = PDH_FMT_COUNTERVALUE::default();
         let status = unsafe { PdhGetFormattedCounterValue(counter.0, FORMAT, None, &mut value) };
-        (status == ERROR_SUCCESS && value.CStatus == ERROR_SUCCESS).then(|| unsafe { value.Anonymous.doubleValue })
+        (status == ERROR_SUCCESS && value.CStatus == ERROR_SUCCESS).then_some(unsafe { value.Anonymous.doubleValue })
     }
 
     /// All instances of a wildcard counter as `(instance name, value)`.

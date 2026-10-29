@@ -18,7 +18,8 @@ pub fn enabled() -> bool {
 /// Registers the running exe (wherever it lives now) or removes the entry.
 pub fn set(on: bool) -> windows::core::Result<()> {
     if on {
-        let exe = std::env::current_exe().map_err(|e| windows::core::Error::new(windows::core::HRESULT(-1), e.to_string()))?;
+        let exe = std::env::current_exe()
+            .map_err(|e| windows::core::Error::new(windows::core::HRESULT(-1), e.to_string()))?;
         let command = HSTRING::from(format!("\"{}\"", exe.display()));
         let bytes = (command.len() + 1) * 2; // UTF-16 including the terminating NUL
         unsafe {
