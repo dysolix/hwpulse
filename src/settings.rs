@@ -18,6 +18,8 @@ pub struct Settings {
     pub hidden_groups: BTreeSet<String>,
     /// `"{group id}/{reading id}"` of individual cards hidden from the dashboard.
     pub hidden_readings: BTreeSet<String>,
+    /// Custom dashboard order as [`Group::id`]s; empty means the default order.
+    pub order: Vec<String>,
 }
 
 impl Settings {
@@ -42,21 +44,59 @@ impl Settings {
         }
     }
 
-    pub fn dashboard_is_default(&self) -> bool {
+    pub fn visibility_is_default(&self) -> bool {
         self.hidden_groups.is_empty() && self.hidden_readings.is_empty()
     }
 
-    /// Shows every component and card again; other settings are kept.
-    pub fn reset_dashboard(&mut self) {
+    /// Shows every component and card again; order and other settings are kept.
+    pub fn reset_visibility(&mut self) {
         self.hidden_groups.clear();
         self.hidden_readings.clear();
     }
 
-    /// The groups as the dashboard should show them: hidden components and cards
-    /// removed, components without any visible card dropped.
-    pub fn dashboard_groups(&self, groups: &[Group]) -> Vec<Group> {
-        groups
+    /// `groups` (in default order) rearranged by the custom order. Components missing
+    /// from it (e.g. a drive plugged in for the first time) keep their default spot
+    /// relative to their neighbours: right after the closest preceding known one.
+    pub fn ordered<'a>(&self, groups: &'a [Group]) -> Vec<&'a Group> {
+        let mut rank = -1.0f32;
+        let mut ranked: Vec<(f32, &Group)> = groups
             .iter()
+            .map(|g| {
+                rank = match self.order.iter().position(|id| *id == g.id) {
+                    Some(i) => i as f32,
+                    None => rank + 0.001,
+                };
+                (rank, g)
+            })
+            .collect();
+        ranked.sort_by(|a, b| a.0.total_cmp(&b.0));
+        ranked.into_iter().map(|(_, g)| g).collect()
+    }
+
+    /// Moves the component at `from` to `to` (both indices into `ordered`, `to` being
+    /// the slot it is dropped before) and stores the resulting order.
+    pub fn reorder(&mut self, ordered: &[&Group], from: usize, to: usize) {
+        let mut ids: Vec<String> = ordered.iter().map(|g| g.id.clone()).collect();
+        let moved = ids.remove(from);
+        ids.insert(if to > from { to - 1 } else { to }, moved);
+        // Keep components that are not connected right now (an unplugged drive) at
+        // their place: re-insert each right after the id that preceded it before.
+        let previous = std::mem::take(&mut self.order);
+        for (pos, id) in previous.iter().enumerate() {
+            if ids.contains(id) {
+                continue;
+            }
+            let after = previous[..pos].iter().rev().find_map(|p| ids.iter().position(|x| x == p));
+            ids.insert(after.map_or(0, |i| i + 1), id.clone());
+        }
+        self.order = ids;
+    }
+
+    /// The groups as the dashboard should show them: custom order applied, hidden
+    /// components and cards removed, components without any visible card dropped.
+    pub fn dashboard_groups(&self, groups: &[Group]) -> Vec<Group> {
+        self.ordered(groups)
+            .into_iter()
             .filter(|g| self.group_visible(&g.id))
             .map(|g| {
                 let mut g = g.clone();
@@ -71,4 +111,68 @@ impl Settings {
 
 fn reading_key(group: &str, reading: &str) -> String {
     format!("{group}/{reading}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sensors::Kind;
+
+    fn groups(ids: &[&str]) -> Vec<Group> {
+        ids.iter()
+            .map(|id| Group {
+                id: id.to_string(),
+                kind: Kind::Cpu,
+                order: 0,
+                title: String::new(),
+                subtitle: String::new(),
+                readings: Vec::new(),
+                breakdown: None,
+            })
+            .collect()
+    }
+
+    fn ids(groups: &[&Group]) -> Vec<String> {
+        groups.iter().map(|g| g.id.clone()).collect()
+    }
+
+    #[test]
+    fn default_order_without_custom_order() {
+        let g = groups(&["cpu", "gpu", "mem"]);
+        assert_eq!(ids(&Settings::default().ordered(&g)), ["cpu", "gpu", "mem"]);
+    }
+
+    #[test]
+    fn reorder_moves_down_and_up() {
+        let g = groups(&["cpu", "gpu", "mem", "net"]);
+        let mut s = Settings::default();
+        s.reorder(&s.ordered(&g), 0, 3); // cpu dropped before net
+        assert_eq!(ids(&s.ordered(&g)), ["gpu", "mem", "cpu", "net"]);
+        s.reorder(&s.ordered(&g), 3, 0); // net to the top
+        assert_eq!(ids(&s.ordered(&g)), ["net", "gpu", "mem", "cpu"]);
+    }
+
+    #[test]
+    fn new_component_appears_after_its_default_predecessor() {
+        let mut s = Settings { order: vec!["mem".into(), "cpu".into(), "disk1".into()], ..Default::default() };
+        // usb sits after disk1 in default order, so it follows disk1.
+        let g = groups(&["cpu", "mem", "disk1", "usb"]);
+        assert_eq!(ids(&s.ordered(&g)), ["mem", "cpu", "disk1", "usb"]);
+        // A new component first in default order goes to the very top.
+        s.order = vec!["mem".into(), "cpu".into()];
+        let g = groups(&["new", "cpu", "mem"]);
+        assert_eq!(ids(&s.ordered(&g)), ["new", "mem", "cpu"]);
+    }
+
+    #[test]
+    fn unplugged_component_keeps_its_place_when_reordering() {
+        let mut s = Settings {
+            order: vec!["cpu".into(), "usb".into(), "disk1".into(), "net".into()],
+            ..Default::default()
+        };
+        // usb is unplugged while net is moved to the top.
+        let connected = groups(&["cpu", "disk1", "net"]);
+        s.reorder(&s.ordered(&connected), 2, 0);
+        assert_eq!(s.order, ["net", "cpu", "usb", "disk1"]);
+    }
 }

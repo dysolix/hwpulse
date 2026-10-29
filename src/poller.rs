@@ -4,14 +4,15 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 
 use crate::sensors::{self, Group};
 
 pub const INTERVAL: Duration = Duration::from_secs(1);
-/// Samples kept per reading (2 minutes at 1 s).
+/// Samples shown per reading (2 minutes at 1 s). One more is kept, so the oldest
+/// can slide out of the charts while a new one slides in.
 pub const HISTORY_LEN: usize = 120;
 
 #[derive(Default)]
@@ -22,6 +23,8 @@ pub struct Model {
     pub machine: Option<String>,
     /// Keyed by `"{group.id}/{reading.id}"`.
     pub history: HashMap<String, VecDeque<f32>>,
+    /// When the latest samples arrived, for animating the charts in between.
+    pub updated: Option<Instant>,
 }
 
 pub type Shared = Arc<Mutex<Model>>;
@@ -55,7 +58,7 @@ pub fn spawn(ctx: egui::Context) -> Shared {
                     let mut seen = HashSet::new();
                     for (key, value) in samples {
                         let h = m.history.entry(key.clone()).or_default();
-                        if h.len() == HISTORY_LEN {
+                        if h.len() > HISTORY_LEN {
                             h.pop_front();
                         }
                         h.push_back(value as f32);
@@ -65,6 +68,7 @@ pub fn spawn(ctx: egui::Context) -> Shared {
                     // so a reconnect starts a fresh graph instead of one with a hidden gap.
                     m.history.retain(|key, _| seen.contains(key));
                     m.groups = groups;
+                    m.updated = Some(Instant::now());
                 }
                 ctx.request_repaint();
                 thread::sleep(INTERVAL);

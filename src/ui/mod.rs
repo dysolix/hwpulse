@@ -1,3 +1,4 @@
+mod performance;
 pub mod theme;
 pub mod widgets;
 pub mod window;
@@ -14,6 +15,7 @@ use crate::settings::{self, Settings};
 #[derive(Clone, Debug, PartialEq)]
 enum Page {
     Dashboard,
+    Performance,
     Components,
     /// Detail view of one group, by [`Group::id`].
     Component(String),
@@ -24,6 +26,7 @@ pub struct App {
     model: Shared,
     page: Page,
     settings: Settings,
+    performance: performance::State,
 }
 
 impl App {
@@ -31,7 +34,7 @@ impl App {
         theme::apply(&cc.egui_ctx);
         window::style_title_bar(cc);
         let settings = cc.storage.and_then(|s| eframe::get_value(s, settings::STORAGE_KEY)).unwrap_or_default();
-        Self { model: poller::spawn(cc.egui_ctx.clone()), page: Page::Dashboard, settings }
+        Self { model: poller::spawn(cc.egui_ctx.clone()), page: Page::Dashboard, settings, performance: Default::default() }
     }
 }
 
@@ -46,8 +49,10 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let model = self.model.lock().unwrap();
+        widgets::set_timeline(ui.ctx(), model.updated.map(|t| t.elapsed()));
         let page = &self.page;
         let settings = &mut self.settings;
+        let performance = &mut self.performance;
         // Navigation requested during this frame; applied after drawing.
         let mut nav: Option<Page> = None;
 
@@ -60,6 +65,11 @@ impl eframe::App for App {
             .frame(Frame::new().fill(theme::BG).inner_margin(Margin::same(22)))
             .show(ui, |ui| {
                 header(ui, &model, page, &mut nav);
+                if *page == Page::Performance {
+                    // Two independently scrolling panes instead of one page scroll.
+                    performance::page(ui, &model, settings, performance);
+                    return;
+                }
                 let viewport_height = ui.available_height();
                 ScrollArea::vertical().id_salt(format!("{page:?}")).auto_shrink(false).show(ui, |ui| {
                     let content_top = ui.cursor().top();
@@ -77,6 +87,7 @@ impl eframe::App for App {
                         Page::Components => components(ui, &model, &mut nav),
                         Page::Component(id) => detail(ui, &model, id, &mut nav),
                         Page::Settings => settings_page(ui, &model, settings),
+                        Page::Performance => {}
                     }
                 });
             });
@@ -121,7 +132,12 @@ fn header(ui: &mut Ui, model: &Model, page: &Page, nav: &mut Option<Page>) {
 
     // Segmented page switcher: left of the pill when everything fits in one row,
     // otherwise on its own row below the title so nothing overlaps.
-    let tabs = [("Dashboard", Page::Dashboard), ("Components", Page::Components), ("Settings", Page::Settings)];
+    let tabs = [
+        ("Dashboard", Page::Dashboard),
+        ("Performance", Page::Performance),
+        ("Components", Page::Components),
+        ("Settings", Page::Settings),
+    ];
     let font = theme::semibold(12.5);
     let widths: Vec<f32> = tabs.iter().map(|(t, _)| p.layout_no_wrap(t.to_string(), font.clone(), theme::TEXT).size().x + 28.0).collect();
     let total: f32 = widths.iter().sum::<f32>() + 6.0;
@@ -172,10 +188,62 @@ const MAX_COLUMNS: usize = 4;
 /// Upper bound for growing stat cards to even out columns; beyond it a gap remains.
 const MAX_STRETCH: f32 = 60.0;
 
+/// An ongoing drag of a dashboard section.
+#[derive(Clone)]
+struct SectionDrag {
+    id: String,
+    /// Where it would be inserted among the other visible sections.
+    insert: usize,
+    /// Pointer position relative to the section's top-left corner.
+    grab: egui::Vec2,
+}
+
 /// Masonry-style dashboard: as many columns as fit, components balanced across them,
 /// then shorter columns stretch their stat cards so all columns end at the same height.
-fn dashboard(ui: &mut Ui, model: &Model, settings: &Settings, nav: &mut Option<Page>) {
-    let groups = &settings.dashboard_groups(&model.groups);
+///
+/// Sections can be reordered by dragging their header. While dragging, the dashboard
+/// shows the layout as it would be after the drop: for every possible insertion point
+/// the resulting layout is computed, and the one whose free slot is closest to the
+/// floating section wins. That choice depends only on where the floating section is,
+/// not on the layout currently shown, so the preview cannot flip back and forth.
+fn dashboard(ui: &mut Ui, model: &Model, settings: &mut Settings, nav: &mut Option<Page>) {
+    const SLIDE: f32 = 0.22;
+    /// A different slot must be this much closer before the preview switches to it.
+    const HYSTERESIS: f32 = 24.0;
+
+    let ctx = ui.ctx().clone();
+    let base = ui.scope_id().with("dashboard");
+    let drag_id = |g: &Group| base.with(("drag", &g.id));
+    let state_id = base.with("drag_state");
+    let animate_until_id = base.with("animate_until");
+    let now = ctx.input(|i| i.time);
+    let released = ctx.input(|i| i.pointer.any_released());
+
+    // Apply a finished drag before laying out, so everything slides from there.
+    let state: Option<SectionDrag> = ctx.data(|d| d.get_temp(state_id));
+    if released && let Some(drag) = &state {
+        let visible = settings.dashboard_groups(&model.groups);
+        let others: Vec<&Group> = visible.iter().filter(|g| g.id != drag.id).collect();
+        let full = settings.ordered(&model.groups);
+        let from = full.iter().position(|g| g.id == drag.id);
+        // Insert before the section that follows in the preview, or after the last one.
+        let to = match others.get(drag.insert) {
+            Some(next) => full.iter().position(|g| g.id == next.id),
+            None => others.last().and_then(|last| full.iter().position(|g| g.id == last.id)).map(|i| i + 1),
+        };
+        if let (Some(from), Some(to)) = (from, to)
+            && to != from
+            && to != from + 1
+        {
+            settings.reorder(&full, from, to);
+        }
+        ctx.data_mut(|d| {
+            d.remove::<SectionDrag>(state_id);
+            d.insert_temp(animate_until_id, now + SLIDE as f64 + 0.05);
+        });
+    }
+
+    let groups = settings.dashboard_groups(&model.groups);
     if groups.is_empty() {
         if !model.groups.is_empty() {
             ui.add_space(40.0);
@@ -189,43 +257,158 @@ fn dashboard(ui: &mut Ui, model: &Model, settings: &Settings, nav: &mut Option<P
         return;
     }
 
-    let fit = ((ui.available_width() + GAP) / (MIN_COLUMN + GAP)) as usize;
-    let columns = fit.clamp(1, MAX_COLUMNS).min(groups.len());
-    let heights: Vec<f32> = groups.iter().map(section_height).collect();
+    let width = ui.available_width();
+    let origin = ui.cursor().min;
+    let pointer = ctx.pointer_latest_pos();
+    let all: Vec<&Group> = groups.iter().collect();
+    let dragged = if released { None } else { all.iter().position(|g| ctx.dragged_id() == Some(drag_id(g))) };
+
+    // The order to show: as is, or the drop preview while dragging.
+    let mut order = all.clone();
+    let mut layout = masonry(&order, width, origin);
+    let mut lifted: Option<(&Group, egui::Pos2)> = None;
+    if let (Some(d), Some(p)) = (dragged, pointer) {
+        let group = all[d];
+        let grab = state.as_ref().filter(|s| s.id == group.id).map(|s| s.grab).unwrap_or(p - layout.slots[d].0.min);
+        let float_pos = p - grab;
+        let others: Vec<&Group> = all.iter().copied().filter(|g| g.id != group.id).collect();
+        let current = state.as_ref().filter(|s| s.id == group.id).map_or(d, |s| s.insert.min(others.len()));
+
+        let candidate = |k: usize| {
+            let mut order = others.clone();
+            order.insert(k, group);
+            let layout = masonry(&order, width, origin);
+            let distance = (layout.slots[k].0.min - float_pos).length();
+            (order, layout, distance)
+        };
+        let (mut best_k, mut best) = (current, candidate(current));
+        for k in (0..=others.len()).filter(|&k| k != current) {
+            let c = candidate(k);
+            if c.2 < best.2 - HYSTERESIS {
+                (best_k, best) = (k, c);
+            }
+        }
+        (order, layout) = (best.0, best.1);
+        ctx.data_mut(|data| {
+            data.insert_temp(state_id, SectionDrag { id: group.id.clone(), insert: best_k, grab })
+        });
+        lifted = Some((group, float_pos));
+    } else if !released && state.is_some() {
+        ctx.data_mut(|d| d.remove::<SectionDrag>(state_id));
+    }
+
+    let animating = lifted.is_some() || ctx.data(|d| d.get_temp::<f64>(animate_until_id)).is_some_and(|t| now < t);
+    let slide = if animating { SLIDE } else { 0.0 };
+
+    for (i, group) in order.iter().enumerate() {
+        let (rect, stretch) = layout.slots[i];
+        if lifted.is_some_and(|(g, _)| g.id == group.id) {
+            // The free slot where the dragged section will land.
+            let slot = rect.with_max_y(rect.bottom() - SECTION_GAP);
+            ui.painter().rect(
+                slot,
+                CornerRadius::same(theme::CARD_RADIUS),
+                theme::ACCENT.gamma_multiply(0.07),
+                egui::Stroke::new(1.5, theme::ACCENT.gamma_multiply(0.6)),
+                egui::StrokeKind::Inside,
+            );
+            continue;
+        }
+        let x = ctx.animate_value_with_time(base.with(("x", &group.id)), rect.left() - origin.x, slide);
+        let y = ctx.animate_value_with_time(base.with(("y", &group.id)), rect.top() - origin.y, slide);
+        let shown = Rect::from_min_size(origin + vec2(x, y), rect.size());
+        ui.scope_builder(egui::UiBuilder::new().max_rect(shown), |ui| {
+            group_section(ui, group, model, nav, stretch, drag_id(group));
+        });
+    }
+    ui.allocate_rect(Rect::from_min_max(origin, egui::pos2(origin.x + width, layout.bottom)), Sense::hover());
+
+    let Some((group, float_pos)) = lifted else { return };
+    let i = order.iter().position(|g| g.id == group.id).unwrap_or(0);
+    let (rect, stretch) = layout.slots[i];
+
+    // The section floats under the pointer; its slide position follows, so on
+    // release it glides from there into the slot.
+    const LIFT_PAD: f32 = 12.0;
+    ctx.animate_value_with_time(base.with(("x", &group.id)), float_pos.x - origin.x, 0.0);
+    ctx.animate_value_with_time(base.with(("y", &group.id)), float_pos.y - origin.y, 0.0);
+    egui::Area::new(base.with("floating"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(float_pos - vec2(LIFT_PAD, LIFT_PAD))
+        .show(&ctx, |ui| {
+            ui.set_opacity(0.94);
+            Frame::new()
+                .fill(theme::BG)
+                .stroke(egui::Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.6)))
+                .corner_radius(CornerRadius::same(theme::CARD_RADIUS + 4))
+                .inner_margin(Margin::same(LIFT_PAD as i8))
+                .shadow(egui::Shadow { offset: [0, 16], blur: 40, spread: 0, color: egui::Color32::from_black_alpha(170) })
+                .show(ui, |ui| {
+                    ui.set_width(rect.width());
+                    let mut no_nav = None;
+                    group_section(ui, group, model, &mut no_nav, stretch, drag_id(group));
+                });
+        });
+
+    // Scroll when dragging near the top or bottom edge of the view.
+    if let Some(p) = pointer {
+        let view = ui.clip_rect();
+        let delta = if p.y < view.top() + 48.0 {
+            12.0
+        } else if p.y > view.bottom() - 48.0 {
+            -12.0
+        } else {
+            0.0
+        };
+        if delta != 0.0 {
+            ui.scroll_with_delta(vec2(0.0, delta));
+            ctx.request_repaint();
+        }
+    }
+}
+
+struct Layout {
+    /// Per section (same order as the input): its rect and stat card stretch.
+    slots: Vec<(Rect, f32)>,
+    bottom: f32,
+}
+
+/// Positions `groups` (in display order) in masonry columns starting at `origin`.
+fn masonry(groups: &[&Group], width: f32, origin: egui::Pos2) -> Layout {
+    let fit = ((width + GAP) / (MIN_COLUMN + GAP)) as usize;
+    let columns = fit.clamp(1, MAX_COLUMNS).min(groups.len().max(1));
+    let column_width = (width - GAP * (columns - 1) as f32) / columns as f32;
+    let heights: Vec<f32> = groups.iter().map(|g| section_height(g)).collect();
     let assignment = balance_columns(&heights, columns);
     let column_heights: Vec<f32> = assignment.iter().map(|col| col.iter().map(|&i| heights[i]).sum()).collect();
     let tallest = column_heights.iter().copied().fold(0.0, f32::max);
 
-    ui.columns(columns, |cols| {
-        for ((ui, members), height) in cols.iter_mut().zip(assignment).zip(column_heights) {
-            let rows: usize = members.iter().map(|&i| stat_rows(&groups[i])).sum();
-            let stretch = if rows > 0 { ((tallest - height) / rows as f32).min(MAX_STRETCH) } else { 0.0 };
-            for i in members {
-                group_section(ui, &groups[i], model, nav, stretch);
-            }
+    let mut slots = vec![(Rect::NOTHING, 0.0f32); groups.len()];
+    for (c, (members, height)) in assignment.iter().zip(&column_heights).enumerate() {
+        let rows: usize = members.iter().map(|&i| stat_rows(groups[i])).sum();
+        let stretch = if rows > 0 { ((tallest - height) / rows as f32).min(MAX_STRETCH) } else { 0.0 };
+        let x = origin.x + c as f32 * (column_width + GAP);
+        let mut y = origin.y;
+        for &i in members {
+            let h = heights[i] + stretch * stat_rows(groups[i]) as f32;
+            slots[i] = (Rect::from_min_size(egui::pos2(x, y), vec2(column_width, h)), stretch);
+            y += h;
         }
-    });
+    }
+    let bottom = slots.iter().map(|(r, _)| r.bottom()).fold(origin.y, f32::max);
+    Layout { slots, bottom }
 }
 
-/// Longest-processing-time scheduling: tallest sections first, each into the currently
-/// shortest column (ties go left). Each column is then sorted back into display order,
-/// so related components stay in sequence within a column.
+/// Classic masonry: sections in the user's order, each into the currently shortest
+/// column (ties go left). Reading left-to-right, top-to-bottom follows that order.
 fn balance_columns(heights: &[f32], k: usize) -> Vec<Vec<usize>> {
-    let mut by_height: Vec<usize> = (0..heights.len()).collect();
-    by_height.sort_by(|&a, &b| heights[b].total_cmp(&heights[a]).then(a.cmp(&b)));
-
     let mut columns = vec![Vec::new(); k];
     let mut totals = vec![0.0f32; k];
-    for i in by_height {
+    for (i, h) in heights.iter().enumerate() {
         let shortest = (0..k).min_by(|&a, &b| totals[a].total_cmp(&totals[b])).unwrap_or(0);
-        totals[shortest] += heights[i];
+        totals[shortest] += h;
         columns[shortest].push(i);
     }
-    for column in &mut columns {
-        column.sort_unstable();
-    }
-    // Put the column holding the first component on the left.
-    columns.sort_by_key(|c| c.first().copied().unwrap_or(usize::MAX));
     columns
 }
 
@@ -243,14 +426,39 @@ fn section_height(group: &Group) -> f32 {
         + SECTION_GAP
 }
 
-fn group_section(ui: &mut Ui, group: &Group, model: &Model, nav: &mut Option<Page>, stretch: f32) {
+/// One dashboard section. The header doubles as drag handle (`drag_id`) for
+/// reordering; the title itself is a link to the component's detail page.
+fn group_section(
+    ui: &mut Ui,
+    group: &Group,
+    model: &Model,
+    nav: &mut Option<Page>,
+    stretch: f32,
+    drag_id: egui::Id,
+) {
     // Fixed-height header so `section_height` stays exact.
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), SECTION_HEADER), Sense::hover());
+    let handle = ui.interact(rect, drag_id, Sense::drag());
+    let handle = if handle.dragged() {
+        ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+        handle
+    } else {
+        handle.on_hover_cursor(CursorIcon::Grab)
+    };
     let p = ui.painter();
+    if handle.hovered() || handle.dragged() {
+        // Grip in the top-right corner hints that the header can be dragged.
+        let grip = egui::pos2(rect.right() - 8.0, rect.top() + 14.0);
+        for row in -1..=1 {
+            for col in [-1.0f32, 1.0] {
+                p.circle_filled(grip + vec2(col * 3.5, row as f32 * 6.0), 1.8, theme::TEXT_DIM);
+            }
+        }
+    }
     let title = p.layout_no_wrap(format!("{}  ›", group.title), theme::semibold(16.0), theme::TEXT);
     let title_rect = Rect::from_min_size(rect.left_top() + vec2(0.0, 4.0), title.size());
     let response = ui
-        .interact(title_rect, ui.scope_id().with(&group.id), Sense::click())
+        .interact(title_rect, drag_id.with("title"), Sense::click())
         .on_hover_cursor(CursorIcon::PointingHand);
     let color = if response.hovered() { theme::ACCENT } else { theme::TEXT };
     p.galley_with_override_text_color(title_rect.min, title, color);
@@ -277,7 +485,7 @@ fn cards(ui: &mut Ui, group: &Group, model: &Model, stretch: f32) {
     if !featured.is_empty() {
         ui.columns(featured.len(), |cols| {
             for (col, r) in cols.iter_mut().zip(&featured) {
-                widgets::gauge_card(col, r, history(r.id));
+                col.push_id((&group.id, r.id), |ui| widgets::gauge_card(ui, r, history(r.id)));
             }
         });
     }
@@ -286,7 +494,9 @@ fn cards(ui: &mut Ui, group: &Group, model: &Model, stretch: f32) {
     for row in stats.chunks(STATS_PER_ROW) {
         ui.columns(STATS_PER_ROW, |cols| {
             for (col, r) in cols.iter_mut().zip(row) {
-                widgets::stat_card(col, r, history(r.id), widgets::STAT_HEIGHT + stretch);
+                col.push_id((&group.id, r.id), |ui| {
+                    widgets::stat_card(ui, r, history(r.id), widgets::STAT_HEIGHT + stretch)
+                });
             }
         });
     }
@@ -338,29 +548,203 @@ fn dashboard_settings(ui: &mut Ui, model: &Model, settings: &mut Settings) {
     section_heading(
         ui,
         "Dashboard",
-        "Switch components on or off and pick which values get a card. New components show up automatically.",
+        "Drag the handle to reorder, switch components on or off and pick which values get a card. \
+         New components show up automatically.",
     );
-    if !settings.dashboard_is_default() {
+    let resets = [
+        (!settings.visibility_is_default(), "Show everything again"),
+        (!settings.order.is_empty(), "Reset order"),
+    ];
+    if resets.iter().any(|(show, _)| *show) {
         ui.add_space(-4.0);
-        if link(ui, "Show everything again", theme::regular(12.5), theme::ACCENT, false).clicked() {
-            settings.reset_dashboard();
-        }
+        ui.horizontal(|ui| {
+            for (show, label) in resets {
+                if show && link(ui, label, theme::regular(12.5), theme::ACCENT, false).clicked() {
+                    match label {
+                        "Reset order" => settings.order.clear(),
+                        _ => settings.reset_visibility(),
+                    }
+                }
+            }
+        });
     }
     ui.add_space(6.0);
     ui.spacing_mut().item_spacing.y = 10.0;
 
-    for group in &model.groups {
-        let visible = settings.group_visible(&group.id);
-        let color = theme::kind_color(group.kind);
+    reorder_list(ui, model, settings);
+    ui.add_space(14.0);
+}
 
-        Frame::new()
-            .fill(theme::SURFACE)
-            .stroke(egui::Stroke::new(1.0, theme::BORDER))
-            .corner_radius(CornerRadius::same(theme::CARD_RADIUS))
-            .inner_margin(Margin::symmetric(20, 16))
-            .show(ui, |ui| {
+/// Drag-and-drop list of component cards. The dragged card floats above everything
+/// and follows the pointer; the others slide aside to open a gap where it will land.
+/// Cards are positioned manually (heights remembered from the previous frame) so their
+/// movement can be animated.
+fn reorder_list(ui: &mut Ui, model: &Model, settings: &mut Settings) {
+    const GAP: f32 = 10.0;
+    const SLIDE: f32 = 0.18;
+
+    let ctx = ui.ctx().clone();
+    let base = ui.scope_id().with("reorder");
+    let handle_id = |g: &Group| base.with(("handle", &g.id));
+    let anim_id = |g: &Group| base.with(("y", &g.id));
+    let heights_id = base.with("heights");
+    // While dragging: (dragged group id, drop slot among the other cards, grab offset).
+    let state_id = base.with("state");
+
+    // Apply a drop from the previous frames before laying out, so the released card
+    // already slides from where it was let go into its new place.
+    let released = ctx.input(|i| i.pointer.any_released());
+    let state: Option<(String, usize, f32)> = ctx.data(|d| d.get_temp(state_id));
+    if released && let Some((id, slot, _)) = &state {
+        let ordered = settings.ordered(&model.groups);
+        if let Some(from) = ordered.iter().position(|g| &g.id == id) {
+            let to = if *slot >= from { slot + 1 } else { *slot };
+            if to != from && to != from + 1 {
+                settings.reorder(&ordered, from, to);
+            }
+        }
+        ctx.data_mut(|d| d.remove::<(String, usize, f32)>(state_id));
+    }
+
+    let ordered = settings.ordered(&model.groups);
+    let mut heights: std::collections::HashMap<String, f32> = ctx.data(|d| d.get_temp(heights_id)).unwrap_or_default();
+    // Where each resting card was drawn, relative to the list top.
+    let positions_id = base.with("positions");
+    let mut positions: std::collections::HashMap<String, f32> =
+        ctx.data(|d| d.get_temp(positions_id)).unwrap_or_default();
+    let height = |g: &Group, h: &std::collections::HashMap<String, f32>| h.get(&g.id).copied().unwrap_or(110.0);
+
+    let (left, top) = (ui.cursor().left(), ui.cursor().top());
+    let width = ui.available_width();
+    let pointer = ctx.pointer_latest_pos();
+    let dragged = if released { None } else { ordered.iter().position(|g| ctx.dragged_id() == Some(handle_id(g))) };
+
+    // Where the floating card is (relative to the list top) and which slot it is over.
+    let mut lifted: Option<(usize, f32, usize)> = None;
+    if let (Some(d), Some(p)) = (dragged, pointer) {
+        let grab = state.as_ref().filter(|s| s.0 == ordered[d].id).map(|s| s.2).unwrap_or_else(|| {
+            // First frame of the drag: grab offset from where the card was drawn last.
+            p.y - (top + positions.get(&ordered[d].id).copied().unwrap_or(0.0))
+        });
+        let float_y = p.y - grab - top;
+        let center = float_y + height(ordered[d], &heights) / 2.0;
+        let mut y = 0.0;
+        let mut slot = 0;
+        for g in ordered.iter().enumerate().filter(|(i, _)| *i != d).map(|(_, g)| g) {
+            if y + height(g, &heights) / 2.0 < center {
+                slot += 1;
+            }
+            y += height(g, &heights) + GAP;
+        }
+        ctx.data_mut(|d_| d_.insert_temp(state_id, (ordered[d].id.clone(), slot, grab)));
+        lifted = Some((d, float_y, slot));
+    } else if !released && state.is_some() {
+        ctx.data_mut(|d| d.remove::<(String, usize, f32)>(state_id));
+    }
+
+    // Lay out the resting cards, leaving a gap at the drop slot.
+    let mut y = 0.0;
+    let mut slot_index = 0;
+    let mut gap_at = None;
+    for (i, group) in ordered.iter().enumerate() {
+        if lifted.is_some_and(|(d, _, _)| d == i) {
+            continue;
+        }
+        if let Some((d, _, slot)) = lifted
+            && slot == slot_index
+        {
+            gap_at = Some(y);
+            y += height(ordered[d], &heights) + GAP;
+        }
+        let shown = ctx.animate_value_with_time(anim_id(group), y, SLIDE);
+        positions.insert(group.id.clone(), shown);
+        let rect = Rect::from_min_size(egui::pos2(left, top + shown), vec2(width, height(group, &heights)));
+        let drawn = ui
+            .scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                settings_card(ui, group, settings, handle_id(group), false)
+            })
+            .inner;
+        heights.insert(group.id.clone(), drawn.height());
+        y += height(group, &heights) + GAP;
+        slot_index += 1;
+    }
+    if let Some((d, _, slot)) = lifted
+        && slot == slot_index
+    {
+        gap_at = Some(y);
+        y += height(ordered[d], &heights) + GAP;
+    }
+
+    // Reserve the list's space in the parent layout.
+    ui.allocate_rect(Rect::from_min_size(egui::pos2(left, top), vec2(width, (y - GAP).max(0.0))), Sense::hover());
+
+    if let Some((d, float_y, _)) = lifted {
+        let group = ordered[d];
+        if let Some(gap_y) = gap_at {
+            let gap = Rect::from_min_size(egui::pos2(left, top + gap_y), vec2(width, height(group, &heights)));
+            ui.painter().rect(
+                gap,
+                CornerRadius::same(theme::CARD_RADIUS),
+                theme::ACCENT.gamma_multiply(0.05),
+                egui::Stroke::new(1.5, theme::ACCENT.gamma_multiply(0.45)),
+                egui::StrokeKind::Inside,
+            );
+        }
+        // Keep the card's slide animation at the floating position, so on release it
+        // glides from there into the gap.
+        ctx.animate_value_with_time(anim_id(group), float_y, 0.0);
+        egui::Area::new(base.with("floating"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(left, top + float_y))
+            .show(&ctx, |ui| {
+                ui.set_width(width);
+                let drawn = settings_card(ui, group, settings, handle_id(group), true);
+                heights.insert(group.id.clone(), drawn.height());
+            });
+
+        // Scroll when dragging near the top or bottom edge of the view.
+        if let Some(p) = pointer {
+            let view = ui.clip_rect();
+            let edge = 48.0;
+            let delta = if p.y < view.top() + edge {
+                12.0
+            } else if p.y > view.bottom() - edge {
+                -12.0
+            } else {
+                0.0
+            };
+            if delta != 0.0 {
+                ui.scroll_with_delta(vec2(0.0, delta));
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    ctx.data_mut(|d| {
+        d.insert_temp(heights_id, heights);
+        d.insert_temp(positions_id, positions);
+    });
+}
+
+/// One component card on the settings page; `lifted` styles it as being dragged.
+fn settings_card(ui: &mut Ui, group: &Group, settings: &mut Settings, handle_id: egui::Id, lifted: bool) -> Rect {
+    let visible = settings.group_visible(&group.id);
+    let color = theme::kind_color(group.kind);
+
+    let mut frame = Frame::new()
+        .fill(if lifted { theme::RAISED } else { theme::SURFACE })
+        .stroke(egui::Stroke::new(1.0, if lifted { theme::ACCENT } else { theme::BORDER }))
+        .corner_radius(CornerRadius::same(theme::CARD_RADIUS))
+        .inner_margin(Margin::symmetric(20, 16));
+    if lifted {
+        frame = frame.shadow(egui::Shadow { offset: [0, 12], blur: 32, spread: 0, color: egui::Color32::from_black_alpha(150) });
+    }
+
+    frame
+        .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
+                    widgets::drag_handle(ui, handle_id);
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
                         ui.label(
@@ -391,9 +775,9 @@ fn dashboard_settings(ui: &mut Ui, model: &Model, settings: &mut Settings) {
                         }
                     }
                 });
-            });
-    }
-    ui.add_space(14.0);
+            })
+        .response
+        .rect
 }
 
 // ---------------------------------------------------------------------------
@@ -435,7 +819,9 @@ fn detail(ui: &mut Ui, model: &Model, id: &str, nav: &mut Option<Page>) {
             ui.columns(per_row, |cols| {
                 for (col, item) in cols.iter_mut().zip(row) {
                     let history = model.history.get(&format!("{}/#{}", group.id, item.label));
-                    widgets::breakdown_cell(col, item, breakdown.unit, breakdown.range, history);
+                    col.push_id((&group.id, &item.label), |ui| {
+                        widgets::breakdown_cell(ui, item, breakdown.unit, breakdown.range, history)
+                    });
                 }
             });
         }

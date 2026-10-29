@@ -60,7 +60,7 @@ pub fn gauge_card(ui: &mut Ui, reading: &Reading, history: Option<&VecDeque<f32>
 
     if let Some(h) = history {
         let spark = Rect::from_min_max(pos2(inner.left(), inner.bottom() - 34.0), inner.right_bottom());
-        sparkline(&painter, spark, h, reading.range, color);
+        sparkline(ui, reading.id, spark, h, reading.range, color);
     }
 }
 
@@ -111,7 +111,7 @@ pub fn stat_card(ui: &mut Ui, reading: &Reading, history: Option<&VecDeque<f32>>
 
     if let Some(h) = history {
         let spark = Rect::from_min_max(pos2(inner.left(), bottom - spark_height), pos2(inner.right(), bottom));
-        sparkline(&painter, spark, h, reading.range, color);
+        sparkline(ui, reading.id, spark, h, reading.range, color);
     }
 }
 
@@ -138,7 +138,7 @@ pub fn breakdown_cell(
 
     if let Some(h) = history {
         let spark = Rect::from_min_max(pos2(inner.left(), inner.bottom() - 30.0), inner.right_bottom());
-        sparkline(&painter, spark, h, range, color);
+        sparkline(ui, &item.label, spark, h, range, color);
     }
     // Load fill along the bottom edge doubles as a bar.
     if let Some(frac) = fraction_of(item.value, range).filter(|f| *f > 0.0) {
@@ -212,6 +212,26 @@ pub fn component_row(ui: &mut Ui, group: &Group) -> egui::Response {
         right = left;
     }
 
+    response
+}
+
+/// Grip of six dots for reordering; returns the drag response.
+pub fn drag_handle(ui: &mut Ui, id: egui::Id) -> egui::Response {
+    let (rect, _) = ui.allocate_exact_size(vec2(18.0, 36.0), Sense::hover());
+    let response = ui.interact(rect, id, Sense::drag());
+    let cursor = if response.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab };
+    let response = response.on_hover_cursor(cursor);
+    if response.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    }
+
+    let color = if response.hovered() || response.dragged() { theme::TEXT } else { theme::TEXT_FAINT };
+    for row in -1..=1 {
+        for col in [-1.0f32, 1.0] {
+            let c = rect.center() + vec2(col * 3.5, row as f32 * 6.0);
+            ui.painter().circle_filled(c, 1.8, color);
+        }
+    }
     response
 }
 
@@ -343,8 +363,14 @@ fn display(v: f64, unit: Unit) -> (String, &'static str) {
     }
 }
 
+/// Value with its unit as one string, e.g. `"4.55 GHz"` or `"14%"`.
+pub fn format_value(v: f64, unit: Unit) -> String {
+    let (value, unit) = display(v, unit);
+    if unit == "%" { format!("{value}%") } else { format!("{value} {unit}") }
+}
+
 /// Big number with a smaller unit suffix, positioned as one block. Returns its rect.
-fn value_text(
+pub fn value_text(
     painter: &egui::Painter,
     anchor: Pos2,
     (value, unit): (f64, Unit),
@@ -385,28 +411,251 @@ fn arc(painter: &egui::Painter, center: Pos2, radius: f32, start: f32, sweep: f3
 }
 
 /// Line chart that fills from the right edge, with a fading area underneath.
-fn sparkline(painter: &egui::Painter, rect: Rect, values: &VecDeque<f32>, range: Option<(f64, f64)>, color: Color32) {
+fn sparkline(ui: &Ui, key: &str, rect: Rect, values: &VecDeque<f32>, range: Option<(f64, f64)>, color: Color32) {
     if values.len() < 2 {
         return;
     }
-    let (lo, hi) = match range {
-        Some((lo, hi)) => (lo as f32, hi as f32),
-        // Unbounded values: throughput-like series that touch zero scale from zero to
-        // the peak; level-like ones (clocks, free memory) zoom into their recent range
-        // instead of drawing a solid block.
-        None => {
-            let min = values.iter().copied().fold(f32::INFINITY, f32::min);
-            let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            if min <= max * 0.05 {
-                (0.0f32.min(min), (max * 1.15).max(1.0))
-            } else {
-                let pad = ((max - min) * 0.25).max(max.abs() * 0.01).max(0.5);
-                (min - pad, max + pad)
-            }
-        }
+    let bounds = smooth_bounds(ui, key, bounds(extent([values]), range, None));
+    plot_line(&ui.painter_at(rect.expand(2.0)), rect, values, bounds, color, false);
+}
+
+/// How long new samples take to slide in from the right edge.
+const SLIDE: f32 = 0.5;
+
+/// Where the charts are between two polls; shared by every chart in a frame.
+#[derive(Clone, Copy, Default)]
+struct Timeline {
+    /// Part of one sample step the lines still have to slide left (1 → 0, eased).
+    shift: f32,
+}
+
+fn timeline_id() -> egui::Id {
+    egui::Id::NULL.with("chart_timeline")
+}
+
+/// Call once per frame, before drawing charts, with the time since the newest samples
+/// arrived.
+pub fn set_timeline(ctx: &egui::Context, since: Option<std::time::Duration>) {
+    let t = since.map_or(1.0, |d| (d.as_secs_f32() / SLIDE).min(1.0));
+    let shift = (1.0 - t).powi(3); // cubic ease-out, like the gauges
+    ctx.data_mut(|d| d.insert_temp(timeline_id(), Timeline { shift }));
+}
+
+fn timeline(ctx: &egui::Context) -> Timeline {
+    ctx.data(|d| d.get_temp(timeline_id())).unwrap_or_default()
+}
+
+/// Eases scale changes (a peak leaving the window, a new maximum) instead of jumping.
+fn smooth_bounds(ui: &Ui, key: &str, (lo, hi): (f32, f32)) -> (f32, f32) {
+    const DURATION: f32 = 0.4;
+    let id = ui.scope_id().with(("bounds", key));
+    let ctx = ui.ctx();
+    (ctx.animate_value_with_time(id.with(0), lo, DURATION), ctx.animate_value_with_time(id.with(1), hi, DURATION))
+}
+
+/// Smallest and largest sample across several series.
+fn extent<'a>(series: impl IntoIterator<Item = &'a VecDeque<f32>>) -> (f32, f32) {
+    series.into_iter().flatten().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)))
+}
+
+/// Vertical scale for samples between `min` and `max`. Unbounded throughput-like
+/// series that touch zero scale from zero to the peak; level-like ones (clocks, free
+/// memory) zoom into their recent range instead of drawing a solid block. With
+/// `axis` the zero-based top is rounded to a value worth printing as axis label.
+fn bounds((min, max): (f32, f32), range: Option<(f64, f64)>, axis: Option<Unit>) -> (f32, f32) {
+    if let Some((lo, hi)) = range {
+        return (lo as f32, hi as f32);
+    }
+    if min > max {
+        return (0.0, 1.0); // no samples yet
+    }
+    if min <= max * 0.05 {
+        let top = match axis {
+            Some(unit) => nice_ceiling(max, unit),
+            None => (max * 1.15).max(1.0),
+        };
+        (0.0f32.min(min), top)
+    } else {
+        let pad = ((max - min) * 0.25).max(max.abs() * 0.01).max(0.5);
+        (min - pad, max + pad)
+    }
+}
+
+/// Next 1 / 2 / 5 step at or above `v`, in the magnitude it is displayed in
+/// (KB/s → MB/s steps by 1024, Kbps → Mbps by 1000).
+fn nice_ceiling(v: f32, unit: Unit) -> f32 {
+    let base = match unit {
+        Unit::BytesPerSec | Unit::Mebibytes => 1024.0,
+        Unit::BitsPerSec => 1000.0,
+        _ => 0.0,
     };
+    let floor = match unit {
+        Unit::BytesPerSec => 1024.0,
+        Unit::BitsPerSec => 1000.0,
+        _ => 1.0,
+    };
+    let v = v.max(floor);
+    let mut scale = 1.0;
+    if base > 0.0 {
+        while v / scale >= base {
+            scale *= base;
+        }
+    }
+    let x = v / scale;
+    let magnitude = 10f32.powf(x.log10().floor());
+    let step = [1.0, 2.0, 5.0, 10.0].into_iter().map(|m| m * magnitude).find(|s| *s >= x).unwrap_or(x);
+    step * scale
+}
+
+/// One line in a [`chart`] or [`thumbnail`].
+pub struct Series<'a> {
+    pub label: &'a str,
+    pub history: Option<&'a VecDeque<f32>>,
+    pub value: f64,
+    pub unit: Unit,
+    /// Secondary lines (upload, write) are dashed and unfilled.
+    pub dashed: bool,
+}
+
+/// Task Manager style history chart: grid, one or more lines, scale labels and a
+/// hover readout. `compact` charts show the current value instead of axis labels.
+pub fn chart(
+    ui: &mut Ui,
+    height: f32,
+    title: &str,
+    series: &[Series],
+    range: Option<(f64, f64)>,
+    color: Color32,
+    compact: bool,
+) {
+    let rect = card(ui, height);
+    let Some(first) = series.first() else { return };
+    let painter = ui.painter_at(rect);
+    let inner = rect.shrink2(vec2(16.0, 14.0));
+    let (lo, hi) = bounds(extent(series.iter().filter_map(|s| s.history)), range, Some(first.unit));
+    // Labels show the target scale, the lines ease towards it.
+    let (line_lo, line_hi) = smooth_bounds(ui, title, (lo, hi));
+
+    // Header: title and legend on the left, scale or current value on the right.
+    let title = painter.text(inner.left_top(), Align2::LEFT_TOP, title.to_uppercase(), theme::semibold(11.0), theme::TEXT_DIM);
+    let corner = if compact {
+        painter.text(inner.right_top(), Align2::RIGHT_TOP, format_value(first.value, first.unit), theme::semibold(12.5), theme::TEXT)
+    } else {
+        painter.text(inner.right_top(), Align2::RIGHT_TOP, format_value(hi as f64, first.unit), theme::regular(11.0), theme::TEXT_FAINT)
+    };
+    if series.len() > 1 {
+        let mut x = title.right() + 16.0;
+        let y = title.center().y;
+        for s in series {
+            let label = painter.layout_no_wrap(s.label.to_owned(), theme::regular(11.5), theme::TEXT_DIM);
+            if x + 22.0 + label.size().x > corner.left() - 10.0 {
+                break;
+            }
+            let stroke = Stroke::new(1.6, color);
+            if s.dashed {
+                painter.extend(Shape::dashed_line(&[pos2(x, y), pos2(x + 16.0, y)], stroke, 4.0, 3.0));
+            } else {
+                painter.line_segment([pos2(x, y), pos2(x + 16.0, y)], stroke);
+            }
+            x += 22.0;
+            painter.galley(pos2(x, y - label.size().y / 2.0), label.clone(), theme::TEXT_DIM);
+            x += label.size().x + 14.0;
+        }
+    }
+
+    let footer = if compact { 0.0 } else { 20.0 };
+    let plot = Rect::from_min_max(pos2(inner.left(), inner.top() + 24.0), pos2(inner.right(), inner.bottom() - footer));
+    grid(&painter, plot, if compact { (6, 2) } else { (12, 4) });
+    if !compact {
+        let span = HISTORY_LEN as u64 * crate::poller::INTERVAL.as_secs();
+        let span = if span % 60 == 0 { format!("{} minutes", span / 60) } else { format!("{span} seconds") };
+        let y = plot.bottom() + 6.0;
+        painter.text(pos2(plot.left(), y), Align2::LEFT_TOP, span, theme::regular(11.0), theme::TEXT_FAINT);
+        let low = format_value(lo as f64, first.unit);
+        painter.text(pos2(plot.right(), y), Align2::RIGHT_TOP, low, theme::regular(11.0), theme::TEXT_FAINT);
+    }
+    for s in series.iter().rev() {
+        if let Some(h) = s.history.filter(|h| h.len() >= 2) {
+            plot_line(&painter, plot, h, (line_lo, line_hi), color, s.dashed);
+        }
+    }
+
+    // Hover readout: the samples under the pointer, following the sliding line.
+    let Some(pointer) = ui.ctx().pointer_hover_pos().filter(|p| plot.contains(*p) && ui.rect_contains_pointer(rect)) else {
+        return;
+    };
+    let step = plot.width() / (HISTORY_LEN - 1) as f32;
+    let shift = timeline(ui.ctx()).shift;
+    let ago = ((plot.right() + shift * step - pointer.x) / step).round().max(0.0) as usize;
+    let x = plot.right() - (ago as f32 - shift) * step;
+    let mut lines = Vec::new();
+    for s in series {
+        let Some(h) = s.history.filter(|h| ago < h.len()) else { continue };
+        let v = h[h.len() - 1 - ago];
+        let t = ((v - line_lo) / (line_hi - line_lo)).clamp(0.0, 1.0);
+        painter.circle_filled(pos2(x, plot.bottom() - t * plot.height()), 3.5, color);
+        lines.push(if series.len() > 1 {
+            format!("{}  {}", s.label, format_value(v as f64, s.unit))
+        } else {
+            format_value(v as f64, s.unit)
+        });
+    }
+    if lines.is_empty() {
+        return;
+    }
+    painter.line_segment([pos2(x, plot.top()), pos2(x, plot.bottom())], Stroke::new(1.0, theme::BORDER_HOVER));
+    let when = if ago == 0 { "now".to_owned() } else { format!("{} s ago", ago as u64 * crate::poller::INTERVAL.as_secs()) };
+    let when = painter.layout_no_wrap(when, theme::regular(11.0), theme::TEXT_FAINT);
+    let text = painter.layout_no_wrap(lines.join("\n"), theme::semibold(12.5), theme::TEXT);
+    let size = vec2(text.size().x.max(when.size().x), when.size().y + 2.0 + text.size().y) + vec2(20.0, 14.0);
+    let left = if x + 10.0 + size.x <= plot.right() { x + 10.0 } else { (x - 10.0 - size.x).max(plot.left()) };
+    let tip = Rect::from_min_size(pos2(left, plot.top() + 4.0), size);
+    painter.rect(tip, CornerRadius::same(8), theme::RAISED, Stroke::new(1.0, theme::BORDER_HOVER), StrokeKind::Inside);
+    let when_height = when.size().y;
+    painter.galley(tip.min + vec2(10.0, 7.0), when, theme::TEXT_FAINT);
+    painter.galley(tip.min + vec2(10.0, 9.0 + when_height), text, theme::TEXT);
+}
+
+/// Tiny framed chart without labels, for list rows.
+pub fn thumbnail(painter: &egui::Painter, rect: Rect, series: &[Series], range: Option<(f64, f64)>, color: Color32) {
+    painter.rect(rect, CornerRadius::same(5), theme::BG, Stroke::new(1.0, color.gamma_multiply(0.45)), StrokeKind::Inside);
+    let Some(first) = series.first() else { return };
+    let bounds = bounds(extent(series.iter().filter_map(|s| s.history)), range, Some(first.unit));
+    let plot = rect.shrink2(vec2(2.0, 3.0));
+    for s in series.iter().rev() {
+        if let Some(h) = s.history.filter(|h| h.len() >= 2) {
+            plot_line(painter, plot, h, bounds, color, s.dashed);
+        }
+    }
+}
+
+fn grid(painter: &egui::Painter, rect: Rect, (columns, rows): (usize, usize)) {
+    let stroke = Stroke::new(1.0, theme::TRACK);
+    for i in 1..columns {
+        painter.vline(rect.left() + rect.width() * i as f32 / columns as f32, rect.y_range(), stroke);
+    }
+    for i in 1..rows {
+        painter.hline(rect.x_range(), rect.top() + rect.height() * i as f32 / rows as f32, stroke);
+    }
+    painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0, theme::BORDER), StrokeKind::Outside);
+}
+
+/// Draws `values` right-aligned in `rect` (one step per sample of the full history).
+/// Solid lines get a fading area underneath; dashed ones stay unfilled.
+///
+/// Right after new samples arrive the line still sits one step further right and
+/// slides into place (see [`Timeline`]); the oldest sample slides out on the left.
+fn plot_line(painter: &egui::Painter, rect: Rect, values: &VecDeque<f32>, (lo, hi): (f32, f32), color: Color32, dashed: bool) {
     let step = rect.width() / (HISTORY_LEN - 1) as f32;
-    let x0 = rect.right() - step * (values.len() - 1) as f32;
+    let shift = timeline(painter.ctx()).shift;
+    if shift > 0.0 {
+        // 30 fps keeps the slide smooth at half the cost of 60.
+        painter.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+    }
+    // Clip only sideways, so strokes along the top and bottom stay whole.
+    let clip = Rect::from_x_y_ranges(rect.x_range(), painter.clip_rect().y_range()).intersect(painter.clip_rect());
+    let painter = painter.with_clip_rect(clip);
+    let x0 = rect.right() - step * ((values.len() - 1) as f32 - shift);
     let points: Vec<Pos2> = values
         .iter()
         .enumerate()
@@ -416,6 +665,10 @@ fn sparkline(painter: &egui::Painter, rect: Rect, values: &VecDeque<f32>, range:
         })
         .collect();
 
+    if dashed {
+        painter.extend(Shape::dashed_line(&points, Stroke::new(1.4, color), 4.0, 3.0));
+        return;
+    }
     let mut mesh = Mesh::default();
     let top = color.gamma_multiply(0.28);
     let bottom = Color32::TRANSPARENT;
@@ -430,4 +683,11 @@ fn sparkline(painter: &egui::Painter, rect: Rect, values: &VecDeque<f32>, range:
     }
     painter.add(Shape::mesh(mesh));
     painter.add(Shape::line(points, Stroke::new(1.6, color)));
+}
+
+/// Single-line text cut off with "…" at `width`.
+pub fn elided(painter: &egui::Painter, text: &str, font: egui::FontId, color: Color32, width: f32) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(0.0));
+    painter.layout_job(job)
 }
