@@ -18,6 +18,7 @@ jobs:
   fmt:
     # Formatting needs no build, so it runs on the cheaper Linux runner.
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -28,6 +29,7 @@ jobs:
   clippy-test:
     # Windows-only APIs and rc.exe in build.rs: lints and tests need Windows.
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
