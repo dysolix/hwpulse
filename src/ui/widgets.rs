@@ -10,7 +10,7 @@ use eframe::egui::{
 
 use super::theme;
 use crate::poller::HISTORY_LEN;
-use crate::sensors::{Reading, Unit};
+use crate::sensors::{BreakdownItem, Group, Reading, Unit};
 
 pub const FEATURED_HEIGHT: f32 = 252.0;
 pub const STAT_HEIGHT: f32 = 128.0;
@@ -46,7 +46,7 @@ pub fn gauge_card(ui: &mut Ui, reading: &Reading, history: Option<&VecDeque<f32>
         arc(&painter, center, radius, start, sweep * frac, Stroke::new(width, color));
     }
 
-    value_text(&painter, center + vec2(0.0, -4.0), reading, 38.0, 15.0, Align2::CENTER_CENTER);
+    value_text(&painter, center + vec2(0.0, -4.0), (reading.value, reading.unit), 38.0, 15.0, Align2::CENTER_CENTER);
 
     if let Some(detail) = &reading.detail {
         painter.text(
@@ -64,9 +64,11 @@ pub fn gauge_card(ui: &mut Ui, reading: &Reading, history: Option<&VecDeque<f32>
     }
 }
 
-/// Compact card: label, value, optional usage bar and a sparkline.
-pub fn stat_card(ui: &mut Ui, reading: &Reading, history: Option<&VecDeque<f32>>) {
-    let rect = card(ui, STAT_HEIGHT);
+/// Compact card: label, value, optional usage bar and a sparkline. Extra height
+/// beyond [`STAT_HEIGHT`] goes to the sparkline.
+pub fn stat_card(ui: &mut Ui, reading: &Reading, history: Option<&VecDeque<f32>>, height: f32) {
+    let rect = card(ui, height);
+    let spark_height = 30.0 + (height - STAT_HEIGHT).max(0.0);
     let painter = ui.painter_at(rect);
     let color = theme::accent(reading.unit, reading.value);
     let inner = rect.shrink2(vec2(PAD, PAD - 2.0));
@@ -80,7 +82,8 @@ pub fn stat_card(ui: &mut Ui, reading: &Reading, history: Option<&VecDeque<f32>>
     );
     painter.circle_filled(pos2(inner.right() - 3.0, inner.top() + 6.0), 3.0, color);
 
-    let value = value_text(&painter, inner.left_top() + vec2(0.0, 22.0), reading, 25.0, 12.5, Align2::LEFT_TOP);
+    let anchor = inner.left_top() + vec2(0.0, 22.0);
+    let value = value_text(&painter, anchor, (reading.value, reading.unit), 25.0, 12.5, Align2::LEFT_TOP);
 
     if let Some(detail) = &reading.detail {
         // Right of the value when there is room, otherwise tucked underneath it.
@@ -107,9 +110,109 @@ pub fn stat_card(ui: &mut Ui, reading: &Reading, history: Option<&VecDeque<f32>>
     }
 
     if let Some(h) = history {
-        let spark = Rect::from_min_max(pos2(inner.left(), bottom - 30.0), pos2(inner.right(), bottom));
+        let spark = Rect::from_min_max(pos2(inner.left(), bottom - spark_height), pos2(inner.right(), bottom));
         sparkline(&painter, spark, h, reading.range, color);
     }
+}
+
+pub const CELL_HEIGHT: f32 = 100.0;
+
+/// Small tile for one breakdown item (e.g. a CPU thread): value, detail, sparkline.
+pub fn breakdown_cell(
+    ui: &mut Ui,
+    item: &BreakdownItem,
+    unit: Unit,
+    range: Option<(f64, f64)>,
+    history: Option<&VecDeque<f32>>,
+) {
+    let rect = card(ui, CELL_HEIGHT);
+    let painter = ui.painter_at(rect);
+    let color = theme::accent(unit, item.value);
+    let inner = rect.shrink2(vec2(14.0, 12.0));
+
+    painter.text(inner.left_top(), Align2::LEFT_TOP, item.label.to_uppercase(), theme::semibold(10.5), theme::TEXT_DIM);
+    value_text(&painter, inner.left_top() + vec2(0.0, 17.0), (item.value, unit), 19.0, 11.0, Align2::LEFT_TOP);
+    if let Some(detail) = &item.detail {
+        painter.text(inner.right_top(), Align2::RIGHT_TOP, detail, theme::regular(11.0), theme::TEXT_FAINT);
+    }
+
+    if let Some(h) = history {
+        let spark = Rect::from_min_max(pos2(inner.left(), inner.bottom() - 30.0), inner.right_bottom());
+        sparkline(&painter, spark, h, range, color);
+    }
+    // Load fill along the bottom edge doubles as a bar.
+    if let Some(frac) = fraction_of(item.value, range).filter(|f| *f > 0.0) {
+        let bar = Rect::from_min_max(
+            pos2(rect.left() + 1.0, rect.bottom() - 3.0),
+            pos2(rect.left() + 1.0 + (rect.width() - 2.0) * frac, rect.bottom() - 1.0),
+        );
+        painter.rect_filled(bar, CornerRadius { sw: theme::CARD_RADIUS, ..Default::default() }, color);
+    }
+}
+
+pub const ROW_HEIGHT: f32 = 78.0;
+
+/// Clickable list row for the components page: kind, name, up to three key values.
+pub fn component_row(ui: &mut Ui, group: &Group) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let hovered = response.hovered();
+    let painter = ui.painter_at(rect);
+    painter.rect(
+        rect,
+        CornerRadius::same(theme::CARD_RADIUS),
+        if hovered { theme::RAISED } else { theme::SURFACE },
+        Stroke::new(1.0, if hovered { theme::BORDER_HOVER } else { theme::BORDER }),
+        StrokeKind::Inside,
+    );
+
+    let inner = rect.shrink2(vec2(20.0, 0.0));
+    let kind_color = theme::kind_color(group.kind);
+
+    // Left: coloured kind tag, name, subtitle.
+    painter.circle_filled(pos2(inner.left() + 3.0, rect.top() + 21.0), 3.0, kind_color);
+    painter.text(
+        pos2(inner.left() + 12.0, rect.top() + 21.0),
+        Align2::LEFT_CENTER,
+        group.kind.label().to_uppercase(),
+        theme::semibold(10.5),
+        kind_color,
+    );
+    painter.text(pos2(inner.left(), rect.top() + 41.0), Align2::LEFT_CENTER, &group.title, theme::semibold(15.0), theme::TEXT);
+    painter.text(
+        pos2(inner.left(), rect.top() + 60.0),
+        Align2::LEFT_CENTER,
+        &group.subtitle,
+        theme::regular(12.0),
+        theme::TEXT_FAINT,
+    );
+
+    // Right: chevron, then key values right-to-left.
+    let chevron_color = if hovered { theme::TEXT } else { theme::TEXT_FAINT };
+    painter.text(inner.right_center(), Align2::RIGHT_CENTER, "›", theme::regular(22.0), chevron_color);
+
+    const COLUMN: f32 = 112.0;
+    let key: Vec<&Reading> = group
+        .readings
+        .iter()
+        .filter(|r| r.featured)
+        .chain(group.readings.iter().filter(|r| !r.featured))
+        .take(3)
+        .collect();
+    // Leave the name room on narrow windows: drop values that would overlap it.
+    let title_right = inner.left() + painter.layout_no_wrap(group.title.clone(), theme::semibold(15.0), theme::TEXT).size().x;
+    let mut right = inner.right() - 30.0;
+    for r in key.iter().rev() {
+        let left = right - COLUMN;
+        if left < title_right + 24.0 {
+            break;
+        }
+        painter.text(pos2(right, rect.top() + 26.0), Align2::RIGHT_CENTER, r.label.to_uppercase(), theme::semibold(10.0), theme::TEXT_FAINT);
+        value_text(&painter, pos2(right, rect.top() + 48.0), (r.value, r.unit), 18.0, 11.0, Align2::RIGHT_CENTER);
+        right = left;
+    }
+
+    response
 }
 
 /// Allocates and paints the card background, returning its rect.
@@ -165,14 +268,17 @@ fn animated(ui: &Ui, key: &str, target: f32) -> f32 {
 }
 
 fn fraction(r: &Reading) -> Option<f32> {
-    let (lo, hi) = r.range?;
-    (hi > lo).then(|| ((r.value - lo) / (hi - lo)).clamp(0.0, 1.0) as f32)
+    fraction_of(r.value, r.range)
+}
+
+fn fraction_of(value: f64, range: Option<(f64, f64)>) -> Option<f32> {
+    let (lo, hi) = range?;
+    (hi > lo).then(|| ((value - lo) / (hi - lo)).clamp(0.0, 1.0) as f32)
 }
 
 /// Value and unit as displayed, scaled to a readable magnitude.
-fn display(r: &Reading) -> (String, &'static str) {
-    let v = r.value;
-    match r.unit {
+fn display(v: f64, unit: Unit) -> (String, &'static str) {
+    match unit {
         Unit::Celsius => (format!("{v:.0}"), "°C"),
         Unit::Percent => (format!("{v:.0}"), "%"),
         Unit::Watts if v < 100.0 => (format!("{v:.1}"), "W"),
@@ -191,8 +297,15 @@ fn display(r: &Reading) -> (String, &'static str) {
 }
 
 /// Big number with a smaller unit suffix, positioned as one block. Returns its rect.
-fn value_text(painter: &egui::Painter, anchor: Pos2, r: &Reading, size: f32, unit_size: f32, align: Align2) -> Rect {
-    let (value, unit) = display(r);
+fn value_text(
+    painter: &egui::Painter,
+    anchor: Pos2,
+    (value, unit): (f64, Unit),
+    size: f32,
+    unit_size: f32,
+    align: Align2,
+) -> Rect {
+    let (value, unit) = display(value, unit);
     let value = painter.layout_no_wrap(value, theme::semibold(size), theme::TEXT);
     let unit = painter.layout_no_wrap(unit.to_owned(), theme::regular(unit_size), theme::TEXT_DIM);
     let gap = 3.0;
@@ -231,11 +344,18 @@ fn sparkline(painter: &egui::Painter, rect: Rect, values: &VecDeque<f32>, range:
     }
     let (lo, hi) = match range {
         Some((lo, hi)) => (lo as f32, hi as f32),
-        // Unbounded values (throughput, clocks) scale from zero to the recent peak.
+        // Unbounded values: throughput-like series that touch zero scale from zero to
+        // the peak; level-like ones (clocks, free memory) zoom into their recent range
+        // instead of drawing a solid block.
         None => {
-            let min = values.iter().copied().fold(0.0, f32::min);
+            let min = values.iter().copied().fold(f32::INFINITY, f32::min);
             let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            (min, (max * 1.15).max(min + 1.0))
+            if min <= max * 0.05 {
+                (0.0f32.min(min), (max * 1.15).max(1.0))
+            } else {
+                let pad = ((max - min) * 0.25).max(max.abs() * 0.01).max(0.5);
+                (min - pad, max + pad)
+            }
         }
     };
     let step = rect.width() / (HISTORY_LEN - 1) as f32;

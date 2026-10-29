@@ -6,12 +6,16 @@ use eframe::egui::{
     self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Margin, Stroke, TextStyle,
 };
 
-use crate::sensors::Unit;
+use crate::sensors::{Kind, Unit};
 
 pub const BG: Color32 = Color32::from_rgb(0x0B, 0x0D, 0x12);
 pub const SURFACE: Color32 = Color32::from_rgb(0x13, 0x16, 0x1E);
 pub const BORDER: Color32 = Color32::from_rgb(0x21, 0x25, 0x32);
 pub const TRACK: Color32 = Color32::from_rgb(0x1F, 0x23, 0x30);
+/// Hovered cards, active tab.
+pub const RAISED: Color32 = Color32::from_rgb(0x1C, 0x20, 0x2C);
+pub const BORDER_HOVER: Color32 = Color32::from_rgb(0x34, 0x3A, 0x4E);
+pub const ACCENT: Color32 = Color32::from_rgb(0x9A, 0xA6, 0xFF);
 pub const TEXT: Color32 = Color32::from_rgb(0xE8, 0xEA, 0xF0);
 pub const TEXT_DIM: Color32 = Color32::from_rgb(0x8B, 0x91, 0xA3);
 pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x5A, 0x60, 0x72);
@@ -30,6 +34,16 @@ pub fn accent(unit: Unit, value: f64) -> Color32 {
         Unit::Mebibytes => Color32::from_rgb(0xC0, 0x84, 0xFC),
         Unit::BytesPerSec => Color32::from_rgb(0x5C, 0xC8, 0xFF),
         Unit::BitsPerSec => Color32::from_rgb(0xF4, 0x72, 0xB6),
+    }
+}
+
+pub fn kind_color(kind: Kind) -> Color32 {
+    match kind {
+        Kind::Cpu => Color32::from_rgb(0x7C, 0x8C, 0xFF),
+        Kind::Gpu => Color32::from_rgb(0x3D, 0xD6, 0x8C),
+        Kind::Memory => Color32::from_rgb(0xC0, 0x84, 0xFC),
+        Kind::Disk => Color32::from_rgb(0x5C, 0xC8, 0xFF),
+        Kind::Network => Color32::from_rgb(0xF4, 0x72, 0xB6),
     }
 }
 

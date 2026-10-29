@@ -40,11 +40,53 @@ pub struct Reading {
 pub struct Group {
     /// Stable key, e.g. `"nvml/0"`.
     pub id: String,
+    pub kind: Kind,
     /// Display position across all providers, see [`order`].
     pub order: u16,
     pub title: String,
     pub subtitle: String,
     pub readings: Vec<Reading>,
+    /// Optional fine-grained values (e.g. per CPU thread), shown on the detail page.
+    pub breakdown: Option<Breakdown>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Kind {
+    Cpu,
+    Gpu,
+    Memory,
+    Disk,
+    Network,
+}
+
+impl Kind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Kind::Cpu => "Processor",
+            Kind::Gpu => "Graphics",
+            Kind::Memory => "Memory",
+            Kind::Disk => "Storage",
+            Kind::Network => "Network",
+        }
+    }
+}
+
+/// Many values of the same kind, e.g. load per logical processor.
+#[derive(Clone, Debug)]
+pub struct Breakdown {
+    pub title: &'static str,
+    pub subtitle: &'static str,
+    pub unit: Unit,
+    pub range: Option<(f64, f64)>,
+    pub items: Vec<BreakdownItem>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BreakdownItem {
+    /// Also the history key within the group, so it must be stable.
+    pub label: String,
+    pub value: f64,
+    pub detail: Option<String>,
 }
 
 /// Sort keys so groups from different providers interleave sensibly.

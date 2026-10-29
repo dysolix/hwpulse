@@ -8,7 +8,7 @@ use serde::Deserialize;
 use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 
 use super::pdh::{Counter, Query};
-use super::{Group, Reading, SensorProvider, Unit, order};
+use super::{Breakdown, BreakdownItem, Group, Kind, Reading, SensorProvider, Unit, order};
 
 pub struct SystemProvider {
     query: Query,
@@ -16,13 +16,17 @@ pub struct SystemProvider {
     disk: Disk,
     net: Net,
     inventory: Inventory,
+    /// Disk instances seen on the last poll, to notice plug/unplug.
+    known_disks: Vec<String>,
 }
 
 struct Cpu {
     utility: Option<Counter>,
-    utility_per_thread: Option<Counter>,
     frequency: Option<Counter>,
     performance: Option<Counter>,
+    thread_utility: Option<Counter>,
+    thread_frequency: Option<Counter>,
+    thread_performance: Option<Counter>,
 }
 
 struct Disk {
@@ -42,9 +46,11 @@ impl SystemProvider {
         let query = Query::new().ok_or("could not open PDH query")?;
         let cpu = Cpu {
             utility: query.add(r"\Processor Information(_Total)\% Processor Utility"),
-            utility_per_thread: query.add(r"\Processor Information(*)\% Processor Utility"),
             frequency: query.add(r"\Processor Information(_Total)\Processor Frequency"),
             performance: query.add(r"\Processor Information(_Total)\% Processor Performance"),
+            thread_utility: query.add(r"\Processor Information(*)\% Processor Utility"),
+            thread_frequency: query.add(r"\Processor Information(*)\Processor Frequency"),
+            thread_performance: query.add(r"\Processor Information(*)\% Processor Performance"),
         };
         let disk = Disk {
             read: query.add(r"\PhysicalDisk(*)\Disk Read Bytes/sec"),
@@ -59,7 +65,7 @@ impl SystemProvider {
         // Prime rate counters so the first real poll has a baseline.
         query.collect();
 
-        Ok(Self { query, cpu, disk, net, inventory: Inventory::load() })
+        Ok(Self { query, cpu, disk, net, inventory: Inventory::load(), known_disks: Vec::new() })
     }
 
     fn cpu_group(&self) -> Group {
@@ -93,24 +99,17 @@ impl SystemProvider {
             });
         }
 
+        let threads = self.threads();
+
         // A single maxed-out thread hides in the total; show the busiest one.
-        let busiest = self
-            .cpu
-            .utility_per_thread
-            .map(|c| q.array(c))
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|(name, _)| !name.contains("_Total"))
-            .max_by(|a, b| a.1.total_cmp(&b.1));
-        if let Some((name, value)) = busiest {
-            let thread = name.rsplit(',').next().unwrap_or(&name);
+        if let Some(busiest) = threads.iter().max_by(|a, b| a.value.total_cmp(&b.value)) {
             readings.push(Reading {
                 id: "busiest",
                 label: "Busiest thread",
-                value: value.clamp(0.0, 100.0),
+                value: busiest.value,
                 unit: Unit::Percent,
                 range: Some((0.0, 100.0)),
-                detail: Some(format!("thread {thread}")),
+                detail: Some(busiest.label.to_lowercase()),
                 featured: false,
             });
         }
@@ -118,11 +117,50 @@ impl SystemProvider {
         let inv = &self.inventory;
         Group {
             id: "cpu".into(),
+            kind: Kind::Cpu,
             order: order::CPU,
             title: inv.cpu_name.clone().unwrap_or_else(|| "Processor".into()),
             subtitle: inv.cpu_topology.clone().unwrap_or_default(),
             readings,
+            breakdown: (!threads.is_empty()).then(|| Breakdown {
+                title: "Threads",
+                subtitle: "Load and effective clock per logical processor",
+                unit: Unit::Percent,
+                range: Some((0.0, 100.0)),
+                items: threads,
+            }),
         }
+    }
+
+    /// Per logical processor, ordered by index. Instance names look like "0,7"
+    /// (group, index); totals are named "_Total" / "0,_Total".
+    fn threads(&self) -> Vec<BreakdownItem> {
+        let q = &self.query;
+        let index = |name: &str| name.rsplit(',').next().and_then(|i| i.parse::<u32>().ok());
+        let freq = by_instance(q, self.cpu.thread_frequency);
+        let perf = by_instance(q, self.cpu.thread_performance);
+
+        let mut threads: Vec<(u32, BreakdownItem)> = self
+            .cpu
+            .thread_utility
+            .map(|c| q.array(c))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(name, load)| {
+                let i = index(&name)?;
+                let clock = freq.get(&name).zip(perf.get(&name)).map(|(f, p)| f * p / 100.0);
+                Some((
+                    i,
+                    BreakdownItem {
+                        label: format!("Thread {i}"),
+                        value: load.clamp(0.0, 100.0),
+                        detail: clock.map(|mhz| format!("{:.2} GHz", mhz / 1000.0)),
+                    },
+                ))
+            })
+            .collect();
+        threads.sort_by_key(|(i, _)| *i);
+        threads.into_iter().map(|(_, t)| t).collect()
     }
 
     fn memory_group(&self) -> Option<Group> {
@@ -166,14 +204,16 @@ impl SystemProvider {
         let inv = &self.inventory;
         Some(Group {
             id: "memory".into(),
+            kind: Kind::Memory,
             order: order::MEMORY,
+            breakdown: None,
             title: inv.memory_name.clone().unwrap_or_else(|| format!("{:.0} GB Memory", total / 1024.0)),
             subtitle: inv.memory_modules.clone().unwrap_or_default(),
             readings,
         })
     }
 
-    fn disk_groups(&self) -> Vec<Group> {
+    fn disk_groups(&mut self) -> Vec<Group> {
         let q = &self.query;
         let read = by_instance(q, self.disk.read);
         let write = by_instance(q, self.disk.write);
@@ -181,6 +221,15 @@ impl SystemProvider {
 
         let mut instances: Vec<&String> = read.keys().filter(|n| *n != "_Total").collect();
         instances.sort();
+
+        // A drive was plugged in or removed (PDH wildcards pick that up on their own):
+        // re-read names, since disk numbers can now point to different drives.
+        if instances.iter().map(|s| s.as_str()).ne(self.known_disks.iter().map(|s| s.as_str())) {
+            self.known_disks = instances.iter().map(|s| s.to_string()).collect();
+            if let Ok(wmi) = wmi::WMIConnection::new() {
+                self.inventory.disks = load_disks(&wmi);
+            }
+        }
 
         instances
             .into_iter()
@@ -214,9 +263,14 @@ impl SystemProvider {
                     subtitle.push(format_size(size));
                 }
 
+                // The model is part of the id so a different drive at the same disk
+                // number never inherits another drive's history or detail page.
+                let model = info.map(|d| d.model.as_str()).unwrap_or("");
                 Group {
-                    id: format!("disk/{index}"),
+                    id: format!("disk/{index}/{model}"),
+                    kind: Kind::Disk,
                     order: order::DISK + index.min(99) as u16,
+                    breakdown: None,
                     title: info.map(|d| d.model.clone()).unwrap_or_else(|| format!("Disk {index}")),
                     subtitle: subtitle.join(" · "),
                     readings,
@@ -247,7 +301,9 @@ impl SystemProvider {
                 let up = sent.get(name).copied().unwrap_or(0.0) * 8.0;
                 Group {
                     id: format!("net/{name}"),
+                    kind: Kind::Network,
                     order: order::NETWORK + i as u16,
+                    breakdown: None,
                     // PDH escapes "(" and ")" in instance names as "[" and "]".
                     title: name.replace("[R]", "").replace('[', "(").replace(']', ")").replace("  ", " "),
                     subtitle: format!("Network · {} link", format_bits(bits)),
@@ -397,17 +453,22 @@ impl Inventory {
             inv.memory_modules = Some(parts.join(" · "));
         }
 
-        if let Ok(disks) = wmi.query::<Win32DiskDrive>() {
-            for d in disks {
-                let mut model = d.model.unwrap_or_else(|| format!("Disk {}", d.index)).trim().to_string();
-                // Seagate reports bare part numbers like "ST4000VN006-3CW104".
-                if model.starts_with("ST") && model[2..].starts_with(|c: char| c.is_ascii_digit()) {
-                    model = format!("Seagate {model}");
-                }
-                inv.disks.insert(d.index, DiskInfo { model, size: d.size });
-            }
-        }
-
+        inv.disks = load_disks(&wmi);
         inv
     }
+}
+
+fn load_disks(wmi: &wmi::WMIConnection) -> HashMap<u32, DiskInfo> {
+    let Ok(disks) = wmi.query::<Win32DiskDrive>() else { return HashMap::new() };
+    disks
+        .into_iter()
+        .map(|d| {
+            let mut model = d.model.unwrap_or_else(|| format!("Disk {}", d.index)).trim().to_string();
+            // Seagate reports bare part numbers like "ST4000VN006-3CW104".
+            if model.starts_with("ST") && model[2..].starts_with(|c: char| c.is_ascii_digit()) {
+                model = format!("Seagate {model}");
+            }
+            (d.index, DiskInfo { model, size: d.size })
+        })
+        .collect()
 }

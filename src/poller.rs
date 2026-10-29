@@ -1,7 +1,7 @@
 //! Background thread that polls all providers on a fixed interval and wakes the UI.
 //! Between ticks nothing runs: the thread sleeps and egui only repaints on request.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -46,15 +46,24 @@ pub fn spawn(ctx: egui::Context) -> Shared {
                 groups.sort_by_key(|g| g.order);
                 {
                     let mut m = model.lock().unwrap();
-                    for g in &groups {
-                        for r in &g.readings {
-                            let h = m.history.entry(format!("{}/{}", g.id, r.id)).or_default();
-                            if h.len() == HISTORY_LEN {
-                                h.pop_front();
-                            }
-                            h.push_back(r.value as f32);
+                    let samples = groups.iter().flat_map(|g| {
+                        let readings = g.readings.iter().map(|r| (format!("{}/{}", g.id, r.id), r.value));
+                        let items = g.breakdown.iter().flat_map(|b| &b.items);
+                        readings.chain(items.map(|i| (format!("{}/#{}", g.id, i.label), i.value)))
+                    });
+
+                    let mut seen = HashSet::new();
+                    for (key, value) in samples {
+                        let h = m.history.entry(key.clone()).or_default();
+                        if h.len() == HISTORY_LEN {
+                            h.pop_front();
                         }
+                        h.push_back(value as f32);
+                        seen.insert(key);
                     }
+                    // Forget components that stopped reporting (e.g. an unplugged drive),
+                    // so a reconnect starts a fresh graph instead of one with a hidden gap.
+                    m.history.retain(|key, _| seen.contains(key));
                     m.groups = groups;
                 }
                 ctx.request_repaint();

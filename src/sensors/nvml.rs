@@ -5,7 +5,7 @@ use nvml_wrapper::Device;
 use nvml_wrapper::Nvml;
 use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
 
-use super::{Group, Reading, SensorProvider, Unit};
+use super::{Group, Kind, Reading, SensorProvider, Unit};
 
 pub struct NvmlProvider {
     gpus: Vec<Gpu>,
@@ -183,7 +183,9 @@ impl Gpu {
 
         Group {
             id: format!("nvml/{}", self.index),
+            kind: Kind::Gpu,
             order: super::order::GPU + self.index as u16,
+            breakdown: None,
             title: self.name.clone(),
             subtitle: if self.driver.is_empty() {
                 "NVIDIA".into()
