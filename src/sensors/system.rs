@@ -14,7 +14,7 @@ use windows::core::HSTRING;
 
 use super::netinfo::{Adapter, Wifi};
 use super::pdh::{Counter, Query};
-use super::processes::{Sampler, Snapshot};
+use super::processes::{Details, Process, Row, Sampler, Snapshot};
 use super::{
     Breakdown, BreakdownItem, Group, Info, Kind, Processes, Reading, SensorProvider, Unit, info, order, top_processes,
 };
@@ -29,6 +29,9 @@ pub struct SystemProvider {
     /// Disk instances seen on the last poll, to notice plug/unplug.
     known_disks: Vec<String>,
     sampler: Sampler,
+    /// The latest sample's processes, for [`SensorProvider::process_table`].
+    processes: Vec<Process>,
+    details: Details,
     battery: Option<super::battery::Battery>,
     wifi: Option<Wifi>,
     /// Adapter addresses, refreshed every few polls (they rarely change).
@@ -134,6 +137,8 @@ impl SystemProvider {
             inventory,
             known_disks: Vec::new(),
             sampler,
+            processes: Vec::new(),
+            details: Details::default(),
             battery: super::battery::Battery::detect(),
             wifi: Wifi::open(),
             adapters: Vec::new(),
@@ -634,11 +639,16 @@ impl SensorProvider for SystemProvider {
         groups.extend(self.battery.as_ref().and_then(|b| b.group()));
         groups.extend(self.disk_groups(&snapshot));
         groups.extend(self.network_groups());
+        self.processes = snapshot.processes;
         groups
     }
 
     fn machine(&self) -> Option<String> {
         self.inventory.board.clone()
+    }
+
+    fn process_table(&mut self) -> Option<Vec<Row>> {
+        Some(self.details.rows(&self.processes))
     }
 }
 

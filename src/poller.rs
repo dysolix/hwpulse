@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-use crate::sensors::{self, Group};
+use crate::sensors::{self, Group, ProcessRow};
 
 pub const INTERVAL: Duration = Duration::from_secs(1);
 /// Samples shown per reading (2 minutes at 1 s). One more is kept, so the oldest
@@ -25,6 +25,10 @@ pub struct Model {
     pub history: HashMap<String, VecDeque<f32>>,
     /// When the latest samples arrived, for animating the charts in between.
     pub updated: Option<Instant>,
+    /// Set by the UI while the Processes page is open; only then is the full list built.
+    pub want_processes: bool,
+    /// Every running process, while `want_processes` is set.
+    pub processes: Option<Vec<ProcessRow>>,
 }
 
 pub type Shared = Arc<Mutex<Model>>;
@@ -47,8 +51,12 @@ pub fn spawn(ctx: egui::Context) -> Shared {
             loop {
                 let mut groups: Vec<Group> = providers.iter_mut().flat_map(|p| p.poll()).collect();
                 groups.sort_by_key(|g| g.order);
+                let want_processes = model.lock().unwrap().want_processes;
+                let processes =
+                    if want_processes { providers.iter_mut().find_map(|p| p.process_table()) } else { None };
                 {
                     let mut m = model.lock().unwrap();
+                    m.processes = processes;
                     let samples = groups.iter().flat_map(|g| {
                         let readings = g.readings.iter().map(|r| (format!("{}/{}", g.id, r.id), r.value));
                         let items = g.breakdown.iter().flat_map(|b| &b.items);

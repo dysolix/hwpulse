@@ -9,6 +9,7 @@ mod netinfo;
 pub mod nvml;
 mod pdh;
 mod processes;
+pub use processes::Row as ProcessRow;
 pub mod system;
 
 /// What a value means — drives formatting and colour in the UI.
@@ -197,6 +198,12 @@ pub trait SensorProvider {
 
     /// Name of the whole machine (e.g. the mainboard), if this provider knows it.
     fn machine(&self) -> Option<String> {
+        None
+    }
+
+    /// Every running process, if this provider lists them. Only called while the
+    /// Processes page is open, as it looks up facts for new processes.
+    fn process_table(&mut self) -> Option<Vec<ProcessRow>> {
         None
     }
 }

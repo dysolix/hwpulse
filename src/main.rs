@@ -5,6 +5,7 @@ mod autostart;
 mod poller;
 mod sensors;
 mod settings;
+mod tasks;
 mod ui;
 
 use eframe::egui;

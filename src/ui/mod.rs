@@ -1,4 +1,5 @@
 mod components;
+mod processes;
 pub mod theme;
 pub mod widgets;
 pub mod window;
@@ -7,10 +8,10 @@ use eframe::egui::{
     self, Align2, CentralPanel, CornerRadius, CursorIcon, Frame, Margin, Rect, Response, ScrollArea, Sense, Ui, vec2,
 };
 
-use crate::autostart;
 use crate::poller::{self, Model, Shared};
 use crate::sensors::Group;
 use crate::settings::{self, Settings};
+use crate::{autostart, tasks};
 
 #[derive(Clone, Debug, PartialEq)]
 enum Page {
@@ -18,6 +19,7 @@ enum Page {
     Components,
     /// Only a navigation request: the Components page with this [`Group::id`] opened.
     Component(String),
+    Processes,
     Settings,
 }
 
@@ -26,6 +28,7 @@ pub struct App {
     page: Page,
     settings: Settings,
     components: components::State,
+    processes: processes::State,
     /// Whether this copy starts with Windows; checked (and repaired) at startup.
     autostart: autostart::State,
 }
@@ -35,11 +38,19 @@ impl App {
         theme::apply(&cc.egui_ctx);
         window::style_title_bar(cc);
         let settings = cc.storage.and_then(|s| eframe::get_value(s, settings::STORAGE_KEY)).unwrap_or_default();
+        tasks::enable_debug_privilege();
+        // `--page processes` after "Restart as administrator".
+        let args: Vec<String> = std::env::args().collect();
+        let page = match args.windows(2).find(|a| a[0] == "--page").map(|a| a[1].as_str()) {
+            Some("processes") => Page::Processes,
+            _ => Page::Dashboard,
+        };
         Self {
             model: poller::spawn(cc.egui_ctx.clone()),
-            page: Page::Dashboard,
+            page,
             settings,
             components: Default::default(),
+            processes: Default::default(),
             autostart: autostart::check(),
         }
     }
@@ -55,13 +66,19 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
-        let model = self.model.lock().unwrap();
+        let mut model = self.model.lock().unwrap();
+        model.want_processes = self.page == Page::Processes;
+        if !model.want_processes {
+            model.processes = None;
+        }
+        let model = model;
         let focused = ui.ctx().input(|i| i.viewport().focused.unwrap_or(true));
         let slide = focused || self.settings.slide_in_background;
         widgets::set_timeline(ui.ctx(), model.updated.filter(|_| slide).map(|t| t.elapsed()));
         let page = &self.page;
         let settings = &mut self.settings;
         let components = &mut self.components;
+        let processes = &mut self.processes;
         let autostart = &mut self.autostart;
         // Navigation requested during this frame; applied after drawing.
         let mut nav: Option<Page> = None;
@@ -78,6 +95,10 @@ impl eframe::App for App {
                 components::page(ui, &model, settings, components);
                 return;
             }
+            if *page == Page::Processes {
+                processes::page(ui, &model, processes);
+                return;
+            }
             let viewport_height = ui.available_height();
             ScrollArea::vertical().id_salt(format!("{page:?}")).auto_shrink(false).show(ui, |ui| {
                 let content_top = ui.cursor().top();
@@ -90,7 +111,7 @@ impl eframe::App for App {
                         footer(ui, viewport_height - (ui.cursor().top() - content_top));
                     }
                     Page::Settings => settings_page(ui, &model, settings, autostart),
-                    Page::Components | Page::Component(_) => {}
+                    Page::Components | Page::Component(_) | Page::Processes => {}
                 }
             });
         });
@@ -141,7 +162,12 @@ fn header(ui: &mut Ui, model: &Model, page: &Page, nav: &mut Option<Page>) {
 
     // Segmented page switcher: left of the pill when everything fits in one row,
     // otherwise on its own row below the title so nothing overlaps.
-    let tabs = [("Dashboard", Page::Dashboard), ("Components", Page::Components), ("Settings", Page::Settings)];
+    let tabs = [
+        ("Dashboard", Page::Dashboard),
+        ("Components", Page::Components),
+        ("Processes", Page::Processes),
+        ("Settings", Page::Settings),
+    ];
     let font = theme::semibold(12.5);
     let widths: Vec<f32> =
         tabs.iter().map(|(t, _)| p.layout_no_wrap(t.to_string(), font.clone(), theme::TEXT).size().x + 28.0).collect();
