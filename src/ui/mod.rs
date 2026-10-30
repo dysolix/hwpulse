@@ -87,7 +87,7 @@ impl eframe::App for App {
             header(ui, &model, page, &mut nav);
             // Settings work without data; everything else waits for the first samples.
             if model.groups.is_empty() && model.errors.is_empty() && *page != Page::Settings {
-                widgets::waiting(ui);
+                widgets::waiting(ui, widgets::SENSORS.0, widgets::SENSORS.1);
                 return;
             }
             if *page == Page::Components {

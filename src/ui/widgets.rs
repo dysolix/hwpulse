@@ -186,9 +186,12 @@ pub fn chip(ui: &mut Ui, label: &str, on: bool, enabled: bool, color: Color32) -
     response
 }
 
-/// Startup screen until the first samples arrive: a spinning arc with a short
+/// Text of [`waiting`] until the first samples arrive.
+pub const SENSORS: (&str, &str) = ("Waiting for sensors…", "Reading processor, graphics, memory, drives and network");
+
+/// Loading screen, e.g. until the first samples arrive: a spinning arc with a short
 /// message, centred in the remaining space.
-pub fn waiting(ui: &mut Ui) {
+pub fn waiting(ui: &mut Ui, title: &str, subtitle: &str) {
     const RADIUS: f32 = 18.0;
     let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
     let painter = ui.painter_at(rect);
@@ -208,17 +211,11 @@ pub fn waiting(ui: &mut Ui) {
         .collect();
     painter.add(Shape::line(points, Stroke::new(3.0, theme::ACCENT)));
 
-    painter.text(
-        center + vec2(0.0, RADIUS + 24.0),
-        Align2::CENTER_TOP,
-        "Waiting for sensors…",
-        theme::semibold(15.0),
-        theme::TEXT,
-    );
+    painter.text(center + vec2(0.0, RADIUS + 24.0), Align2::CENTER_TOP, title, theme::semibold(15.0), theme::TEXT);
     painter.text(
         center + vec2(0.0, RADIUS + 48.0),
         Align2::CENTER_TOP,
-        "Reading processor, graphics, memory, drives and network",
+        subtitle,
         theme::regular(12.5),
         theme::TEXT_FAINT,
     );

@@ -33,7 +33,7 @@ const GAP: f32 = 12.0;
 pub fn page(ui: &mut Ui, model: &Model, settings: &Settings, state: &mut State) {
     let groups = settings.ordered(&model.groups);
     if groups.is_empty() {
-        widgets::waiting(ui);
+        widgets::waiting(ui, widgets::SENSORS.0, widgets::SENSORS.1);
         return;
     }
 

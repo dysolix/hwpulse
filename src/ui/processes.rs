@@ -176,7 +176,7 @@ fn target(row: &ProcessRow) -> Target {
 
 pub fn page(ui: &mut Ui, model: &Model, state: &mut State) {
     let Some(rows) = &model.processes else {
-        widgets::waiting(ui);
+        widgets::waiting(ui, "Listing processes…", "Reading names, users and descriptions of every running process");
         return;
     };
 
