@@ -66,10 +66,12 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
-        let mut model = self.model.lock().unwrap();
+        let mut model = self.model.lock();
         model.want_processes = self.page == Page::Processes;
         if !model.want_processes {
             model.processes = None;
+        } else if model.processes.is_none() {
+            self.model.wake();
         }
         let model = model;
         let focused = ui.ctx().input(|i| i.viewport().focused.unwrap_or(true));

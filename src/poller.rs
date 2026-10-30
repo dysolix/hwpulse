@@ -2,7 +2,7 @@
 //! Between ticks nothing runs: the thread sleeps and egui only repaints on request.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -31,11 +31,28 @@ pub struct Model {
     pub processes: Option<Vec<ProcessRow>>,
 }
 
-pub type Shared = Arc<Mutex<Model>>;
+/// The model plus a way to wake the poller between ticks.
+#[derive(Clone, Default)]
+pub struct Shared {
+    model: Arc<Mutex<Model>>,
+    wake: Arc<Condvar>,
+}
+
+impl Shared {
+    pub fn lock(&self) -> MutexGuard<'_, Model> {
+        self.model.lock().unwrap()
+    }
+
+    /// Builds the process list right away instead of at the next tick; call after
+    /// setting [`Model::want_processes`].
+    pub fn wake(&self) {
+        self.wake.notify_one();
+    }
+}
 
 pub fn spawn(ctx: egui::Context) -> Shared {
-    let shared: Shared = Arc::default();
-    let model = shared.clone();
+    let shared = Shared::default();
+    let (model, wake) = (shared.model.clone(), shared.wake.clone());
 
     thread::Builder::new()
         .name("sensor-poller".into())
@@ -52,8 +69,7 @@ pub fn spawn(ctx: egui::Context) -> Shared {
                 let mut groups: Vec<Group> = providers.iter_mut().flat_map(|p| p.poll()).collect();
                 groups.sort_by_key(|g| g.order);
                 let want_processes = model.lock().unwrap().want_processes;
-                let processes =
-                    if want_processes { providers.iter_mut().find_map(|p| p.process_table()) } else { None };
+                let processes = want_processes.then(|| process_table(&mut providers));
                 {
                     let mut m = model.lock().unwrap();
                     m.processes = processes;
@@ -79,10 +95,31 @@ pub fn spawn(ctx: egui::Context) -> Shared {
                     m.updated = Some(Instant::now());
                 }
                 ctx.request_repaint();
-                thread::sleep(INTERVAL);
+
+                // Sleep until the next tick. When the Processes page opens meanwhile,
+                // build its list from the latest sample right away.
+                let next = Instant::now() + INTERVAL;
+                let mut m = model.lock().unwrap();
+                loop {
+                    let wanted = |m: &mut Model| m.want_processes && m.processes.is_none();
+                    let timeout = next.saturating_duration_since(Instant::now());
+                    let (guard, result) = wake.wait_timeout_while(m, timeout, |m| !wanted(m)).unwrap();
+                    if result.timed_out() {
+                        break;
+                    }
+                    drop(guard);
+                    let table = process_table(&mut providers);
+                    m = model.lock().unwrap();
+                    m.processes = Some(table);
+                    ctx.request_repaint();
+                }
             }
         })
         .expect("failed to spawn poller thread");
 
     shared
+}
+
+fn process_table(providers: &mut [Box<dyn sensors::SensorProvider>]) -> Vec<ProcessRow> {
+    providers.iter_mut().find_map(|p| p.process_table()).unwrap_or_default()
 }
