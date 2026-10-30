@@ -591,16 +591,35 @@ fn chevron(painter: &egui::Painter, center: egui::Pos2, open: bool) {
 // ---------------------------------------------------------------------------
 // Actions
 
-/// Asks for confirmation before ending; suspending and resuming run right away.
+/// Ending always asks for confirmation, suspending only for processes Windows cannot
+/// do without; resuming runs right away.
 fn request(state: &mut State, action: Action, rows: &[&ProcessRow]) {
-    let targets: Vec<Target> = rows.iter().map(|r| target(r)).collect();
+    let mut targets: Vec<Target> = rows.iter().map(|r| target(r)).collect();
     let name = rows.first().map(|r| r.process.name.clone()).unwrap_or_default();
     let label = if rows.len() > 1 { format!("{} processes of {name}", rows.len()) } else { name };
-    match action {
-        Action::End => {
-            let critical = targets.iter().any(|t| tasks::is_critical(*t) == Some(true));
-            state.pending = Some(Pending { action, targets, label, critical });
+    if action == Action::Suspend {
+        // Nothing could resume hwmon once it is frozen.
+        let own = std::process::id();
+        if targets.iter().any(|t| t.pid == own) {
+            state.message = Some(("hwmon cannot suspend itself, as nothing could resume it.".into(), false));
+            targets.retain(|t| t.pid != own);
+            if targets.is_empty() {
+                return;
+            }
         }
+    }
+    // Windows' own flag where readable, else well-known names. Suspending the desktop
+    // window manager freezes the screen, hwmon included.
+    const KNOWN: [&str; 8] =
+        ["System", "Registry", "smss.exe", "csrss.exe", "wininit.exe", "services.exe", "lsass.exe", "winlogon.exe"];
+    let critical = rows.iter().any(|r| match tasks::is_critical(target(r)) {
+        Some(flag) => flag,
+        None => KNOWN.iter().any(|n| r.process.name.eq_ignore_ascii_case(n)),
+    }) || action == Action::Suspend
+        && rows.iter().any(|r| r.process.name.eq_ignore_ascii_case("dwm.exe"));
+    match action {
+        Action::End => state.pending = Some(Pending { action, targets, label, critical }),
+        Action::Suspend if critical => state.pending = Some(Pending { action, targets, label, critical }),
         _ => execute(state, action, &targets, &label),
     }
 }
@@ -635,21 +654,32 @@ fn execute(state: &mut State, action: Action, targets: &[Target], label: &str) {
 fn confirm(ui: &mut Ui, state: &mut State) {
     let Some(pending) = &state.pending else { return };
     let mut decision = None;
-    let modal = egui::Modal::new(egui::Id::NULL.with("confirm_end")).show(ui.ctx(), |ui| {
+    let (title, note, warning, confirm) = match pending.action {
+        Action::Suspend => (
+            "Suspend",
+            "It stops until resumed.",
+            "This process is essential to Windows. Suspending it can freeze the whole system, \
+             hwmon included, so it may not be possible to resume it.",
+            "Suspend anyway",
+        ),
+        _ => (
+            "End",
+            "Unsaved data in it is lost.",
+            "This is a critical Windows process. Ending it crashes Windows.",
+            "End process",
+        ),
+    };
+    let modal = egui::Modal::new(egui::Id::NULL.with("confirm_action")).show(ui.ctx(), |ui| {
         ui.set_width(380.0);
-        ui.label(egui::RichText::new(format!("End {}?", pending.label)).font(theme::semibold(16.0)));
+        ui.label(egui::RichText::new(format!("{title} {}?", pending.label)).font(theme::semibold(16.0)));
         ui.add_space(-4.0);
-        ui.label(egui::RichText::new("Unsaved data in it is lost.").font(theme::regular(12.5)).color(theme::TEXT_DIM));
+        ui.label(egui::RichText::new(note).font(theme::regular(12.5)).color(theme::TEXT_DIM));
         if pending.critical {
-            ui.label(
-                egui::RichText::new("This is a critical Windows process. Ending it crashes Windows.")
-                    .font(theme::semibold(12.5))
-                    .color(theme::ERROR),
-            );
+            ui.label(egui::RichText::new(warning).font(theme::semibold(12.5)).color(theme::ERROR));
         }
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if button(ui, "End process", true, true).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                if button(ui, confirm, true, true).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
                     decision = Some(true);
                 }
                 if button(ui, "Cancel", true, false).clicked() {
