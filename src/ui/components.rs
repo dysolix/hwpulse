@@ -17,12 +17,20 @@ pub struct State {
     selected: Option<String>,
     /// Components with a breakdown (the CPU): one chart per item instead of the total.
     breakdown: bool,
+    /// The component whose details were drawn last frame; opening another (or the
+    /// same one again) starts its details at the top.
+    shown: Option<String>,
 }
 
 impl State {
     /// Opens a component, e.g. when its name is clicked on the dashboard.
     pub fn open(&mut self, id: String) {
         self.selected = Some(id);
+    }
+
+    /// Call when switching to another page, so coming back starts at the top.
+    pub fn leave(&mut self) {
+        self.shown = None;
     }
 }
 
@@ -96,11 +104,16 @@ pub fn page(ui: &mut Ui, model: &Model, settings: &Settings, state: &mut State) 
         let group = groups[i];
         let main = Rect::from_min_max(pos2(side.right() + 25.0, full.top()), full.max);
         ui.scope_builder(egui::UiBuilder::new().max_rect(main), |ui| {
-            ScrollArea::vertical().id_salt(("components", &group.id)).auto_shrink(false).show(ui, |ui| {
+            let mut area = ScrollArea::vertical().id_salt(("components", &group.id)).auto_shrink(false);
+            if state.shown.as_ref() != Some(&group.id) {
+                area = area.vertical_scroll_offset(0.0);
+            }
+            area.show(ui, |ui| {
                 details(ui, group, model, state, main.height());
             });
         });
     }
+    state.shown = index.map(|i| groups[i].id.clone());
     ui.allocate_rect(full, Sense::hover());
 }
 

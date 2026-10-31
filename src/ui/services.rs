@@ -124,7 +124,9 @@ pub fn page(ui: &mut Ui, state: &mut State, nav: &mut Option<Page>) {
         })
         .collect();
     let sort = state.sort;
-    visible.sort_by(|a, b| sort.apply(compare(sort.column, a, b)).then_with(|| a.name.cmp(&b.name)));
+    visible.sort_by(|a, b| {
+        sort.apply(compare(sort.column, a, b)).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
     let selected = state.selected.as_ref().and_then(|n| services.iter().find(|s| &s.name == n)).cloned();
 
     toolbar(ui, state, services.len(), visible.len(), selected.as_ref());

@@ -26,8 +26,10 @@ pub struct Settings {
     pub shown_readings: BTreeSet<String>,
     /// Custom dashboard order as [`Group::id`]s; empty means the default order.
     pub order: Vec<String>,
-    /// Let charts slide while the window is not focused; otherwise they jump once
-    /// per second there, which costs almost nothing.
+    pub animation: Animation,
+    /// The former "Animate in the background" switch; only read, to carry it over
+    /// into [`Settings::animation`].
+    #[serde(skip_serializing)]
     pub slide_in_background: bool,
     /// Keys of the Processes page's shown columns; empty means the default set.
     pub process_columns: Vec<String>,
@@ -37,6 +39,47 @@ pub struct Settings {
     pub speed: Speed,
     /// The small window with just the dashboard's values.
     pub compact: bool,
+}
+
+/// When charts slide new samples in; otherwise they jump once per sample, which
+/// costs almost nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Animation {
+    Always,
+    /// Only while hwmon is the active window.
+    #[default]
+    Foreground,
+    Never,
+}
+
+impl Animation {
+    pub const ALL: [Animation; 3] = [Animation::Always, Animation::Foreground, Animation::Never];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Animation::Always => "Always",
+            Animation::Foreground => "Only while active",
+            Animation::Never => "Never",
+        }
+    }
+
+    pub fn slides(self, focused: bool) -> bool {
+        match self {
+            Animation::Always => true,
+            Animation::Foreground => focused,
+            Animation::Never => false,
+        }
+    }
+}
+
+impl Settings {
+    /// Carries over choices stored by older versions.
+    pub fn migrate(mut self) -> Self {
+        if std::mem::take(&mut self.slide_in_background) {
+            self.animation = Animation::Always;
+        }
+        self
+    }
 }
 
 /// How often sensors are read, as Task Manager's "Update speed".

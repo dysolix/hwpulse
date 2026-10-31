@@ -57,7 +57,11 @@ impl App {
         model.attach(&cc.egui_ctx);
         theme::apply(&cc.egui_ctx);
         window::style_title_bar(cc);
-        let settings = cc.storage.and_then(|s| eframe::get_value(s, settings::STORAGE_KEY)).unwrap_or_default();
+        let settings = cc
+            .storage
+            .and_then(|s| eframe::get_value::<Settings>(s, settings::STORAGE_KEY))
+            .unwrap_or_default()
+            .migrate();
         tasks::enable_debug_privilege();
         // `--page processes` after "Restart as administrator".
         let args: Vec<String> = std::env::args().collect();
@@ -91,6 +95,12 @@ impl eframe::App for App {
         eframe::set_value(storage, settings::STORAGE_KEY, &self.settings);
     }
 
+    /// Only [`Settings`] are kept across restarts; egui's own memory (scroll positions,
+    /// open sections) would reopen pages where they were left.
+    fn persist_egui_memory(&self) -> bool {
+        false
+    }
+
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         theme::BG.to_normalized_gamma_f32()
     }
@@ -107,7 +117,7 @@ impl eframe::App for App {
         }
         let model = model;
         let focused = ui.ctx().input(|i| i.viewport().focused.unwrap_or(true));
-        let slide = focused || self.settings.slide_in_background;
+        let slide = self.settings.animation.slides(focused);
         widgets::set_timeline(ui.ctx(), model.updated.filter(|_| slide).map(|t| t.elapsed()));
         let page = &self.page;
         let settings = &mut self.settings;
@@ -160,6 +170,9 @@ impl eframe::App for App {
 
         drop(model);
         if let Some(next) = nav {
+            if self.page == Page::Components {
+                self.components.leave();
+            }
             self.page = match next {
                 Page::Component(id) => {
                     self.components.open(id);
@@ -622,11 +635,6 @@ fn cards(ui: &mut Ui, group: &Group, model: &Model, stretch: f32) {
 /// One section per topic; add new sections below the dashboard one.
 fn settings_page(ui: &mut Ui, model: &Model, settings: &mut Settings, autostart: &mut autostart::State) {
     ui.add_space(4.0);
-    ui.label(egui::RichText::new("Settings").font(theme::semibold(18.0)).color(theme::TEXT));
-    ui.add_space(-8.0);
-    ui.label(egui::RichText::new("Saved automatically").font(theme::regular(12.0)).color(theme::TEXT_FAINT));
-    ui.add_space(10.0);
-
     dashboard_settings(ui, model, settings);
     speed_settings(ui, settings);
     chart_settings(ui, settings);
@@ -678,16 +686,21 @@ fn window_settings(ui: &mut Ui, settings: &mut Settings) {
 }
 
 fn chart_settings(ui: &mut Ui, settings: &mut Settings) {
-    section_heading(ui, "Charts", "New samples slide in from the right while hwmon is the active window.");
-    ui.add_space(6.0);
-    if switch_card(
+    section_heading(
         ui,
-        "Animate in the background",
-        "Keep sliding when another window is active. Uses a bit more CPU.",
-        settings.slide_in_background,
-    ) {
-        settings.slide_in_background = !settings.slide_in_background;
-    }
+        "Chart animation",
+        "New samples slide in from the right; without animation charts jump once per sample, which costs \
+         almost no CPU.",
+    );
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        for animation in settings::Animation::ALL {
+            if widgets::chip(ui, animation.label(), settings.animation == animation, true, theme::ACCENT).clicked() {
+                settings.animation = animation;
+            }
+        }
+    });
     ui.add_space(14.0);
 }
 
@@ -739,8 +752,7 @@ fn section_heading(ui: &mut Ui, title: &str, description: &str) {
     ui.label(egui::RichText::new(description).font(theme::regular(12.0)).color(theme::TEXT_FAINT));
 }
 
-/// Section heading that collapses its body when clicked. The open state is kept
-/// across restarts with the rest of egui's memory.
+/// Section heading that collapses its body when clicked; starts collapsed.
 fn collapsible_section(ui: &mut Ui, title: &str, note: &str, description: &str, body: impl FnOnce(&mut Ui)) {
     let id = ui.scope_id().with(("section", title));
     let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);

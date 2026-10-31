@@ -75,7 +75,8 @@ impl Default for State {
             loading: None,
             loaded: None,
             query: String::new(),
-            sort: Sort { column: Column::Name, descending: false },
+            // Enabled first, then by name.
+            sort: Sort { column: Column::Status, descending: false },
             selected: None,
             notice: None,
         }
@@ -110,7 +111,9 @@ pub fn page(ui: &mut Ui, state: &mut State) {
         })
         .collect();
     let sort = state.sort;
-    visible.sort_by(|a, b| sort.apply(compare(sort.column, a, b)).then_with(|| a.name.cmp(&b.name)));
+    visible.sort_by(|a, b| {
+        sort.apply(compare(sort.column, a, b)).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
     let selected =
         state.selected.as_ref().and_then(|(n, s)| entries.iter().find(|e| &e.name == n && e.source == *s)).cloned();
 
