@@ -48,6 +48,8 @@ pub struct App {
     applied: Option<(bool, bool, settings::Speed)>,
     /// The window size to return to when leaving the compact view.
     full_size: Option<egui::Vec2>,
+    /// The Dashboard page shows its component and value choices instead of the cards.
+    customizing: bool,
     /// Whether this copy starts with Windows; checked (and repaired) at startup.
     autostart: autostart::State,
 }
@@ -85,6 +87,7 @@ impl App {
             users: Default::default(),
             applied: None,
             full_size: None,
+            customizing: false,
             autostart: autostart::check(),
         }
     }
@@ -124,6 +127,7 @@ impl eframe::App for App {
         let components = &mut self.components;
         let processes = &mut self.processes;
         let autostart = &mut self.autostart;
+        let customizing = &mut self.customizing;
         // Navigation requested during this frame; applied after drawing.
         let mut nav: Option<Page> = None;
 
@@ -158,9 +162,10 @@ impl eframe::App for App {
                     ui.label(egui::RichText::new(error).color(theme::ERROR).font(theme::regular(13.0)));
                 }
                 match page {
+                    Page::Dashboard if *customizing => customize_dashboard(ui, &model, settings, customizing),
                     Page::Dashboard => {
-                        dashboard(ui, &model, settings, &mut nav);
-                        footer(ui, settings, viewport_height - (ui.cursor().top() - content_top));
+                        dashboard(ui, &model, settings, &mut nav, customizing);
+                        footer(ui, settings, customizing, viewport_height - (ui.cursor().top() - content_top));
                     }
                     Page::Settings => settings_page(ui, &model, settings, autostart),
                     _ => {}
@@ -173,6 +178,7 @@ impl eframe::App for App {
             if self.page == Page::Components {
                 self.components.leave();
             }
+            self.customizing = false;
             self.page = match next {
                 Page::Component(id) => {
                     self.components.open(id);
@@ -338,7 +344,7 @@ struct SectionDrag {
 /// the resulting layout is computed, and the one whose free slot is closest to the
 /// floating section wins. That choice depends only on where the floating section is,
 /// not on the layout currently shown, so the preview cannot flip back and forth.
-fn dashboard(ui: &mut Ui, model: &Model, settings: &mut Settings, nav: &mut Option<Page>) {
+fn dashboard(ui: &mut Ui, model: &Model, settings: &mut Settings, nav: &mut Option<Page>, customizing: &mut bool) {
     const SLIDE: f32 = 0.22;
     /// A different slot must be this much closer before the preview switches to it.
     const HYSTERESIS: f32 = 24.0;
@@ -382,7 +388,7 @@ fn dashboard(ui: &mut Ui, model: &Model, settings: &mut Settings, nav: &mut Opti
             ui.vertical_centered(|ui| {
                 ui.label(egui::RichText::new("Everything is hidden").font(theme::semibold(16.0)).color(theme::TEXT));
                 if link(ui, "Choose what to show  ›", theme::regular(13.0), theme::TEXT_DIM, false).clicked() {
-                    *nav = Some(Page::Settings);
+                    *customizing = true;
                 }
             });
         }
@@ -635,7 +641,6 @@ fn cards(ui: &mut Ui, group: &Group, model: &Model, stretch: f32) {
 /// One section per topic; add new sections below the dashboard one.
 fn settings_page(ui: &mut Ui, model: &Model, settings: &mut Settings, autostart: &mut autostart::State) {
     ui.add_space(4.0);
-    dashboard_settings(ui, model, settings);
     speed_settings(ui, settings);
     chart_settings(ui, settings);
     window_settings(ui, settings);
@@ -660,7 +665,7 @@ fn hardware_settings(ui: &mut Ui, model: &Model) {
         ui.spacing_mut().item_spacing.x = 8.0;
         for format in Format::ALL {
             let label = match copied {
-                Some((f, _)) if f == format => "Copied ✓".to_owned(),
+                Some((f, _)) if f == format => "Copied".to_owned(),
                 _ => format.label().to_owned(),
             };
             if table::button(ui, &label, !model.groups.is_empty(), false).clicked() {
@@ -784,52 +789,37 @@ fn section_heading(ui: &mut Ui, title: &str, description: &str) {
     ui.label(egui::RichText::new(description).font(theme::regular(12.0)).color(theme::TEXT_FAINT));
 }
 
-/// Section heading that collapses its body when clicked; starts collapsed.
-fn collapsible_section(ui: &mut Ui, title: &str, note: &str, description: &str, body: impl FnOnce(&mut Ui)) {
-    let id = ui.scope_id().with(("section", title));
-    let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
-    let openness = state.openness(ui.ctx());
-
-    let response = ui
-        .horizontal(|ui| {
-            let title = ui.painter().layout_no_wrap(title.to_owned(), theme::semibold(16.0), theme::TEXT);
-            let (rect, _) = ui.allocate_exact_size(vec2(title.size().x + 26.0, title.size().y), Sense::hover());
-            let hovered = ui.rect_contains_pointer(ui.max_rect().with_max_y(rect.bottom()));
-            ui.painter().galley(rect.min, title, theme::TEXT);
-            // Chevron pointing right when collapsed, down when open.
-            let c = egui::pos2(rect.right() - 8.0, rect.center().y);
-            let angle = openness * std::f32::consts::FRAC_PI_2;
-            let rot = egui::emath::Rot2::from_angle(angle);
-            let stroke = egui::Stroke::new(1.6, if hovered { theme::TEXT } else { theme::TEXT_FAINT });
-            let arm = |v: egui::Vec2| c + rot * v;
-            ui.painter().line(vec![arm(vec2(-2.5, -5.0)), arm(vec2(2.5, 0.0)), arm(vec2(-2.5, 5.0))], stroke);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new(note).font(theme::regular(12.0)).color(theme::TEXT_FAINT));
-            });
-        })
-        .response
-        .interact(Sense::click())
-        .on_hover_cursor(CursorIcon::PointingHand);
-    if response.clicked() {
-        state.toggle(ui);
-    }
-    ui.add_space(-8.0);
-    ui.label(egui::RichText::new(description).font(theme::regular(12.0)).color(theme::TEXT_FAINT));
-    state.show_body_unindented(ui, body);
-}
-
-fn dashboard_settings(ui: &mut Ui, model: &Model, settings: &mut Settings) {
+/// The Dashboard page while customizing: which components and values get cards, in
+/// which order. Done (or Esc) returns to the cards.
+fn customize_dashboard(ui: &mut Ui, model: &Model, settings: &mut Settings, customizing: &mut bool) {
     let shown = model.groups.iter().filter(|g| settings.group_visible(g)).count();
-    collapsible_section(
-        ui,
-        "Dashboard",
-        &format!("{shown} of {} shown", model.groups.len()),
-        "Drag the handle to reorder, switch components on or off and pick which values get a card. \
-         GPUs, CPU and memory are shown by default; drives and network adapters start hidden. \
-         Values for a closer look (latencies, pools, PCIe traffic …) start off and stay on the component page.",
-        |ui| dashboard_list(ui, model, settings),
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.label(egui::RichText::new("Customize dashboard").font(theme::semibold(16.0)).color(theme::TEXT));
+            ui.add_space(-8.0);
+            ui.label(
+                egui::RichText::new(format!("{shown} of {} components shown", model.groups.len()))
+                    .font(theme::regular(12.0))
+                    .color(theme::TEXT_FAINT),
+            );
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if table::button(ui, "Done", true, false).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                *customizing = false;
+            }
+        });
+    });
+    ui.label(
+        egui::RichText::new(
+            "Drag the handle to reorder, switch components on or off and pick which values get a card. \
+             GPUs, CPU and memory are shown by default; drives and network adapters start hidden. \
+             Values for a closer look (latencies, pools, PCIe traffic …) start off and stay on the component page.",
+        )
+        .font(theme::regular(12.0))
+        .color(theme::TEXT_DIM),
     );
-    ui.add_space(14.0);
+    dashboard_list(ui, model, settings);
 }
 
 fn dashboard_list(ui: &mut Ui, model: &Model, settings: &mut Settings) {
@@ -1182,7 +1172,7 @@ fn link(ui: &mut Ui, text: &str, font: egui::FontId, color: egui::Color32, chevr
 
 /// Sits right below the content, or at the bottom of the window when the content
 /// is shorter than the window. `remaining` is the unused viewport height.
-fn footer(ui: &mut Ui, settings: &mut Settings, remaining: f32) {
+fn footer(ui: &mut Ui, settings: &mut Settings, customizing: &mut bool, remaining: f32) {
     const HEIGHT: f32 = 22.0;
     ui.add_space((remaining - HEIGHT).max(2.0));
     let interval = poller::interval().as_secs_f32();
@@ -1195,10 +1185,13 @@ fn footer(ui: &mut Ui, settings: &mut Settings, remaining: f32) {
     };
     ui.vertical_centered(|ui| {
         ui.horizontal(|ui| {
-            let link_width = 100.0;
+            let link_width = 180.0;
             let galley = ui.painter().layout_no_wrap(text.clone(), theme::regular(11.5), theme::TEXT_FAINT);
             ui.add_space(((ui.available_width() - galley.size().x - link_width) / 2.0).max(0.0));
             ui.label(egui::RichText::new(text).font(theme::regular(11.5)).color(theme::TEXT_FAINT));
+            if link(ui, "Customize", theme::regular(11.5), theme::TEXT_DIM, false).clicked() {
+                *customizing = true;
+            }
             if link(ui, "Compact view", theme::regular(11.5), theme::TEXT_DIM, false).clicked() {
                 settings.compact = true;
             }

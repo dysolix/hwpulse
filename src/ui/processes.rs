@@ -923,16 +923,15 @@ fn context_menu(
         close = true;
     }
     let efficient = rows.iter().all(|r| r.efficiency);
-    if ui.button(if efficient { "✓ Efficiency mode" } else { "Efficiency mode" }).clicked() {
+    // Selected (highlighted) items mark what is on; the UI fonts have no check mark.
+    if ui.add(egui::Button::new("Efficiency mode").selected(efficient)).clicked() {
         request(state, Action::Efficiency(!efficient), rows);
         close = true;
     }
     ui.menu_button("Set priority", |ui| {
         let current = single.and_then(|r| Priority::from_base(r.process.priority));
         for priority in Priority::ALL {
-            let label =
-                if current == Some(priority) { format!("✓ {}", priority.label()) } else { priority.label().into() };
-            if ui.button(label).clicked() {
+            if ui.add(egui::Button::new(priority.label()).selected(current == Some(priority))).clicked() {
                 request(state, Action::Priority(priority), rows);
                 ui.close();
             }
