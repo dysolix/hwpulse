@@ -11,8 +11,8 @@ use std::time::Instant;
 use windows::Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemProcessInformation};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Security::{
-    GetTokenInformation, LookupAccountSidW, SID_NAME_USE, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER, TokenElevation,
-    TokenUser,
+    GetLengthSid, GetTokenInformation, LookupAccountSidW, PSID, SID_NAME_USE, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
+    TokenElevation, TokenUser,
 };
 use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
 use windows::Win32::System::SystemInformation::{
@@ -281,11 +281,13 @@ pub struct Row {
     pub facts: Arc<Facts>,
 }
 
-/// Cache of [`Facts`] per process and of descriptions per executable.
+/// Cache of [`Facts`] per process, of descriptions per executable and of user names
+/// per SID (each lookup is a call into LSA, and most processes share a few users).
 #[derive(Default)]
 pub struct Details {
     facts: HashMap<(u32, i64), Arc<Facts>>,
     descriptions: HashMap<String, Option<String>>,
+    users: HashMap<Vec<u8>, Option<String>>,
 }
 
 impl Details {
@@ -308,7 +310,7 @@ impl Details {
 
     fn lookup(&mut self, pid: u32) -> Facts {
         let Some(handle) = Handle::open(pid) else { return Facts::default() };
-        let (user, elevated) = token_facts(handle.0);
+        let (user, elevated) = token_facts(handle.0, &mut self.users);
         let path = image_path(handle.0);
         let description = path.as_ref().and_then(|path| {
             self.descriptions.entry(path.to_lowercase()).or_insert_with(|| file_description(path)).clone()
@@ -317,7 +319,7 @@ impl Details {
     }
 }
 
-fn token_facts(process: HANDLE) -> (Option<String>, Option<bool>) {
+fn token_facts(process: HANDLE, users: &mut HashMap<Vec<u8>, Option<String>>) -> (Option<String>, Option<bool>) {
     let mut token = HANDLE::default();
     if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }.is_err() {
         return (None, None);
@@ -344,25 +346,30 @@ fn token_facts(process: HANDLE) -> (Option<String>, Option<bool>) {
     .ok()
     .and_then(|_| {
         let sid = unsafe { &*(buffer.as_ptr() as *const TOKEN_USER) }.User.Sid;
-        let (mut name, mut domain) = ([0u16; 128], [0u16; 128]);
-        let (mut name_len, mut domain_len) = (name.len() as u32, domain.len() as u32);
-        let mut kind = SID_NAME_USE::default();
-        unsafe {
-            LookupAccountSidW(
-                None,
-                sid,
-                Some(PWSTR(name.as_mut_ptr())),
-                &mut name_len,
-                Some(PWSTR(domain.as_mut_ptr())),
-                &mut domain_len,
-                &mut kind,
-            )
-        }
-        .ok()?;
-        Some(String::from_utf16_lossy(&name[..name_len as usize]))
+        let bytes = unsafe { std::slice::from_raw_parts(sid.0 as *const u8, GetLengthSid(sid) as usize) };
+        users.entry(bytes.to_vec()).or_insert_with(|| account_name(sid)).clone()
     });
     unsafe { CloseHandle(token) }.ok();
     (user, elevated)
+}
+
+fn account_name(sid: PSID) -> Option<String> {
+    let (mut name, mut domain) = ([0u16; 128], [0u16; 128]);
+    let (mut name_len, mut domain_len) = (name.len() as u32, domain.len() as u32);
+    let mut kind = SID_NAME_USE::default();
+    unsafe {
+        LookupAccountSidW(
+            None,
+            sid,
+            Some(PWSTR(name.as_mut_ptr())),
+            &mut name_len,
+            Some(PWSTR(domain.as_mut_ptr())),
+            &mut domain_len,
+            &mut kind,
+        )
+    }
+    .ok()?;
+    Some(String::from_utf16_lossy(&name[..name_len as usize]))
 }
 
 fn architecture(process: HANDLE) -> Option<&'static str> {
