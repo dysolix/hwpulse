@@ -640,6 +640,38 @@ fn settings_page(ui: &mut Ui, model: &Model, settings: &mut Settings, autostart:
     chart_settings(ui, settings);
     window_settings(ui, settings);
     startup_settings(ui, autostart);
+    hardware_settings(ui, model);
+}
+
+/// Copies the hardware summary in the chosen format; the button says so for a moment.
+fn hardware_settings(ui: &mut Ui, model: &Model) {
+    use crate::report::{Format, Report};
+    section_heading(
+        ui,
+        "Copy hardware",
+        "A summary of this PC's components for a support request or forum post. \
+         Leaves out live values, addresses and network names.",
+    );
+    ui.add_space(6.0);
+    let id = ui.scope_id().with("copied");
+    let now = ui.input(|i| i.time);
+    let copied: Option<(Format, f64)> = ui.data(|d| d.get_temp(id)).filter(|(_, at)| now - at < 2.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        for format in Format::ALL {
+            let label = match copied {
+                Some((f, _)) if f == format => "Copied ✓".to_owned(),
+                _ => format.label().to_owned(),
+            };
+            if table::button(ui, &label, !model.groups.is_empty(), false).clicked() {
+                let report = Report::new(model.machine.as_deref(), &model.groups);
+                ui.ctx().copy_text(report.format(format));
+                ui.data_mut(|d| d.insert_temp(id, (format, now)));
+                ui.ctx().request_repaint_after(std::time::Duration::from_secs(2));
+            }
+        }
+    });
+    ui.add_space(14.0);
 }
 
 fn speed_settings(ui: &mut Ui, settings: &mut Settings) {

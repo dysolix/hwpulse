@@ -3,6 +3,7 @@
 
 mod autostart;
 mod poller;
+mod report;
 mod sensors;
 mod services;
 mod settings;
