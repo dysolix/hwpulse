@@ -87,7 +87,7 @@ fn registered_path() -> Option<PathBuf> {
 
 /// `"C:\a b\hwmon.exe" --flag` → `C:\a b\hwmon.exe`; unquoted values up to the
 /// first space after ".exe".
-fn command_path(command: &str) -> &str {
+pub fn command_path(command: &str) -> &str {
     let command = command.trim();
     if let Some(rest) = command.strip_prefix('"') {
         return rest.split('"').next().unwrap_or(rest);

@@ -5,14 +5,16 @@
 //! by [`Details`] only for the Processes page, once per process.
 
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::sync::Arc;
 use std::time::Instant;
 
 use windows::Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemProcessInformation};
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM};
+use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows::Win32::Security::{
-    GetLengthSid, GetTokenInformation, LookupAccountSidW, PSID, SID_NAME_USE, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
-    TokenElevation, TokenUser,
+    GetLengthSid, GetTokenInformation, LookupAccountSidW, PSID, SID_NAME_USE, TOKEN_QUERY, TOKEN_USER, TokenElevation,
+    TokenUser, TokenVirtualizationAllowed, TokenVirtualizationEnabled,
 };
 use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
 use windows::Win32::System::SystemInformation::{
@@ -20,10 +22,15 @@ use windows::Win32::System::SystemInformation::{
     IMAGE_FILE_MACHINE_I386, IMAGE_FILE_MACHINE_UNKNOWN,
 };
 use windows::Win32::System::Threading::{
-    IsWow64Process2, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-    QueryFullProcessImageNameW,
+    GetProcessInformation, IsWow64Process2, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
+    PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+    PROCESS_QUERY_LIMITED_INFORMATION, ProcessPowerThrottling, QueryFullProcessImageNameW,
 };
-use windows::core::{HSTRING, PWSTR, w};
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetWindow, GetWindowLongW, GetWindowTextW, GetWindowThreadProcessId,
+    IsWindowVisible, WS_EX_TOOLWINDOW,
+};
+use windows::core::{BOOL, HSTRING, PWSTR, w};
 
 /// Executable file name of a running process, e.g. `"dwm.exe"`. Needs only the
 /// limited query right, which works for nearly every process without admin.
@@ -136,6 +143,17 @@ pub struct Process {
     pub io_bytes_per_sec: f64,
     pub threads: u32,
     pub handles: u32,
+    pub parent_pid: u32,
+    pub session_id: u32,
+    /// Base priority: 4 idle, 6 below normal, 8 normal, 10 above normal, 13 high, 24 realtime.
+    pub priority: i32,
+    pub working_set: u64,
+    pub peak_working_set: u64,
+    /// Private committed memory (Task Manager's "Commit size").
+    pub commit: u64,
+    pub page_faults: u32,
+    /// User plus kernel time, in 100 ns units.
+    pub cpu_time: i64,
     /// Every thread is suspended, e.g. a UWP app in the background or a process in a debugger.
     pub suspended: bool,
 }
@@ -228,6 +246,14 @@ impl Sampler {
                     io_bytes_per_sec: io_rate,
                     threads: record.number_of_threads,
                     handles: record.handle_count,
+                    parent_pid: record.inherited_from_unique_process_id as u32,
+                    session_id: record.session_id,
+                    priority: record.base_priority,
+                    working_set: record.working_set_size as u64,
+                    peak_working_set: record.peak_working_set_size as u64,
+                    commit: record.private_page_count as u64,
+                    page_faults: record.page_fault_count,
+                    cpu_time,
                     suspended,
                 });
             }
@@ -272,6 +298,30 @@ pub struct Facts {
     pub path: Option<String>,
     /// The executable's file description, e.g. `"Desktop Window Manager"`.
     pub description: Option<String>,
+    pub command_line: Option<String>,
+    pub virtualization: Option<Virtualization>,
+}
+
+/// UAC file and registry virtualization, for old programs that write to protected places.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Virtualization {
+    NotAllowed,
+    Disabled,
+    Enabled,
+}
+
+/// A visible top-level window, which makes its process an app.
+#[derive(Clone, Debug)]
+pub struct Window {
+    pub hwnd: isize,
+    pub title: String,
+}
+
+/// Per-process GPU use from PDH: the busiest engine and dedicated memory.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GpuUse {
+    pub load: f64,
+    pub memory: u64,
 }
 
 /// A process plus its [`Facts`], one row of the Processes page.
@@ -279,67 +329,106 @@ pub struct Facts {
 pub struct Row {
     pub process: Process,
     pub facts: Arc<Facts>,
+    pub gpu: GpuUse,
+    pub window: Option<Window>,
+    /// Windows 11 efficiency mode (EcoQoS): Task Manager's leaf.
+    pub efficiency: bool,
+}
+
+struct Entry {
+    facts: Arc<Facts>,
+    /// Kept open while the process runs, so each refresh needs no new handle.
+    handle: Option<Handle>,
 }
 
 /// Cache of [`Facts`] per process, of descriptions per executable and of user names
 /// per SID (each lookup is a call into LSA, and most processes share a few users).
 #[derive(Default)]
 pub struct Details {
-    facts: HashMap<(u32, i64), Arc<Facts>>,
+    entries: HashMap<(u32, i64), Entry>,
     descriptions: HashMap<String, Option<String>>,
     users: HashMap<Vec<u8>, Option<String>>,
 }
 
 impl Details {
     /// Rows for all `processes`; only processes not seen before cost a lookup.
-    pub fn rows(&mut self, processes: &[Process]) -> Vec<Row> {
-        let mut facts = HashMap::with_capacity(processes.len());
+    pub fn rows(&mut self, processes: &[Process], gpu: &HashMap<u32, GpuUse>) -> Vec<Row> {
+        let windows = windows();
+        let mut entries = HashMap::with_capacity(processes.len());
         let rows = processes
             .iter()
             .map(|p| {
                 let key = (p.pid, p.create_time);
-                let f = self.facts.remove(&key).unwrap_or_else(|| Arc::new(self.lookup(p.pid)));
-                facts.insert(key, f.clone());
-                Row { process: p.clone(), facts: f }
+                let entry = self.entries.remove(&key).unwrap_or_else(|| self.lookup(p.pid));
+                let efficiency = entry.handle.as_ref().is_some_and(|h| efficiency_mode(h.0));
+                let row = Row {
+                    process: p.clone(),
+                    facts: entry.facts.clone(),
+                    gpu: gpu.get(&p.pid).copied().unwrap_or_default(),
+                    window: windows.get(&p.pid).cloned(),
+                    efficiency,
+                };
+                entries.insert(key, entry);
+                row
             })
             .collect();
         // Forget processes that ended.
-        self.facts = facts;
+        self.entries = entries;
         rows
     }
 
-    fn lookup(&mut self, pid: u32) -> Facts {
-        let Some(handle) = Handle::open(pid) else { return Facts::default() };
-        let (user, elevated) = token_facts(handle.0, &mut self.users);
+    fn lookup(&mut self, pid: u32) -> Entry {
+        let Some(handle) = Handle::open(pid) else { return Entry { facts: Default::default(), handle: None } };
+        let token = token_facts(handle.0, &mut self.users);
         let path = image_path(handle.0);
         let description = path.as_ref().and_then(|path| {
-            self.descriptions.entry(path.to_lowercase()).or_insert_with(|| file_description(path)).clone()
+            self.descriptions
+                .entry(path.to_lowercase())
+                .or_insert_with(|| version_string(path, "FileDescription"))
+                .clone()
         });
-        Facts { user, elevated, architecture: architecture(handle.0), path, description }
+        let facts = Facts {
+            user: token.user,
+            elevated: token.elevated,
+            architecture: architecture(handle.0),
+            path,
+            description,
+            command_line: command_line(handle.0),
+            virtualization: token.virtualization,
+        };
+        Entry { facts: Arc::new(facts), handle: Some(handle) }
     }
 }
 
-fn token_facts(process: HANDLE, users: &mut HashMap<Vec<u8>, Option<String>>) -> (Option<String>, Option<bool>) {
+#[derive(Default)]
+struct TokenFacts {
+    user: Option<String>,
+    elevated: Option<bool>,
+    virtualization: Option<Virtualization>,
+}
+
+fn token_facts(process: HANDLE, users: &mut HashMap<Vec<u8>, Option<String>>) -> TokenFacts {
     let mut token = HANDLE::default();
     if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }.is_err() {
-        return (None, None);
+        return TokenFacts::default();
     }
-    let mut elevation = TOKEN_ELEVATION::default();
-    let mut len = 0;
-    let elevated = unsafe {
-        GetTokenInformation(
-            token,
-            TokenElevation,
-            Some(&mut elevation as *mut _ as *mut _),
-            size_of::<TOKEN_ELEVATION>() as u32,
-            &mut len,
-        )
-    }
-    .ok()
-    .map(|_| elevation.TokenIsElevated != 0);
+    let flag = |class| {
+        let mut value = 0u32;
+        let mut len = 0;
+        unsafe { GetTokenInformation(token, class, Some(&mut value as *mut _ as *mut _), 4, &mut len) }
+            .ok()
+            .map(|_| value != 0)
+    };
+    let elevated = flag(TokenElevation);
+    let virtualization = match (flag(TokenVirtualizationAllowed), flag(TokenVirtualizationEnabled)) {
+        (Some(false), _) => Some(Virtualization::NotAllowed),
+        (Some(true), Some(on)) => Some(if on { Virtualization::Enabled } else { Virtualization::Disabled }),
+        _ => None,
+    };
 
     // TOKEN_USER is followed by the SID it points to; 256 bytes fit any SID.
     let mut buffer = [0u64; 32];
+    let mut len = 0;
     let user = unsafe {
         GetTokenInformation(token, TokenUser, Some(buffer.as_mut_ptr().cast()), size_of_val(&buffer) as u32, &mut len)
     }
@@ -350,7 +439,7 @@ fn token_facts(process: HANDLE, users: &mut HashMap<Vec<u8>, Option<String>>) ->
         users.entry(bytes.to_vec()).or_insert_with(|| account_name(sid)).clone()
     });
     unsafe { CloseHandle(token) }.ok();
-    (user, elevated)
+    TokenFacts { user, elevated, virtualization }
 }
 
 fn account_name(sid: PSID) -> Option<String> {
@@ -386,8 +475,103 @@ fn architecture(process: HANDLE) -> Option<&'static str> {
     })
 }
 
-/// `FileDescription` from the executable's version resource, in its first language.
-fn file_description(path: &str) -> Option<String> {
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtQueryInformationProcess(
+        process: HANDLE,
+        class: u32,
+        info: *mut c_void,
+        length: u32,
+        returned: *mut u32,
+    ) -> i32;
+}
+
+/// `ProcessCommandLineInformation`: works with the limited query right (Windows 8.1+).
+const PROCESS_COMMAND_LINE_INFORMATION: u32 = 60;
+
+fn command_line(process: HANDLE) -> Option<String> {
+    #[repr(C)]
+    struct UnicodeString {
+        length: u16,
+        maximum_length: u16,
+        buffer: *const u16,
+    }
+    let mut buffer = vec![0u64; 512];
+    for _ in 0..2 {
+        let mut needed = 0u32;
+        let bytes = (buffer.len() * 8) as u32;
+        let status = unsafe {
+            NtQueryInformationProcess(
+                process,
+                PROCESS_COMMAND_LINE_INFORMATION,
+                buffer.as_mut_ptr().cast(),
+                bytes,
+                &mut needed,
+            )
+        };
+        if status == LENGTH_MISMATCH || needed > bytes {
+            buffer.resize((needed as usize).div_ceil(8) + 1, 0);
+            continue;
+        }
+        if status < 0 {
+            return None;
+        }
+        // SAFETY: the kernel wrote a UNICODE_STRING whose text follows it in the buffer.
+        let s = unsafe { &*(buffer.as_ptr() as *const UnicodeString) };
+        if s.buffer.is_null() || s.length == 0 {
+            return None;
+        }
+        let chars = unsafe { std::slice::from_raw_parts(s.buffer, s.length as usize / 2) };
+        return Some(String::from_utf16_lossy(chars));
+    }
+    None
+}
+
+fn efficiency_mode(process: HANDLE) -> bool {
+    let mut state =
+        PROCESS_POWER_THROTTLING_STATE { Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION, ..Default::default() };
+    let ok = unsafe {
+        GetProcessInformation(
+            process,
+            ProcessPowerThrottling,
+            &mut state as *mut _ as *mut c_void,
+            size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        )
+    };
+    let speed = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+    ok.is_ok() && state.ControlMask & speed != 0 && state.StateMask & speed != 0
+}
+
+/// The first visible, uncloaked, titled top-level window per process: what Task
+/// Manager lists under "Apps".
+fn windows() -> HashMap<u32, Window> {
+    unsafe extern "system" fn each(hwnd: HWND, found: LPARAM) -> BOOL {
+        let found = unsafe { &mut *(found.0 as *mut HashMap<u32, Window>) };
+        let visible = unsafe { IsWindowVisible(hwnd) }.as_bool();
+        let owned = unsafe { GetWindow(hwnd, GW_OWNER) }.is_ok_and(|o| !o.is_invalid());
+        let tool = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOOLWINDOW.0 != 0;
+        let mut cloaked = 0u32;
+        let _ = unsafe { DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut cloaked as *mut _ as *mut c_void, 4) };
+        if visible && !owned && !tool && cloaked == 0 {
+            let mut title = [0u16; 256];
+            let len = unsafe { GetWindowTextW(hwnd, &mut title) } as usize;
+            let mut pid = 0;
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+            if len > 0 && pid != 0 {
+                let title = String::from_utf16_lossy(&title[..len]);
+                found.entry(pid).or_insert(Window { hwnd: hwnd.0 as isize, title });
+            }
+        }
+        true.into()
+    }
+    let mut found: HashMap<u32, Window> = HashMap::new();
+    let _ = unsafe { EnumWindows(Some(each), LPARAM(&mut found as *mut _ as isize)) };
+    found
+}
+
+/// A string from the executable's version resource (`"FileDescription"`,
+/// `"CompanyName"` …), in its first language.
+pub fn version_string(path: &str, key: &str) -> Option<String> {
     let path = HSTRING::from(path);
     let size = unsafe { GetFileVersionInfoSizeW(&path, None) };
     if size == 0 {
@@ -403,10 +587,12 @@ fn file_description(path: &str) -> Option<String> {
         return None;
     }
     let [lang, codepage] = unsafe { *(ptr as *const [u16; 2]) };
-    let key = HSTRING::from(format!("\\StringFileInfo\\{lang:04x}{codepage:04x}\\FileDescription"));
+    let key = HSTRING::from(format!("\\StringFileInfo\\{lang:04x}{codepage:04x}\\{key}"));
     unsafe { VerQueryValueW(data.as_ptr().cast(), &key, &mut ptr, &mut len) }.ok().ok()?;
     let chars = unsafe { std::slice::from_raw_parts(ptr as *const u16, len as usize) };
-    let text = String::from_utf16_lossy(chars).trim_end_matches('\0').trim().to_string();
+    // Some files report a wrong length; the text ends at the first NUL either way.
+    let end = chars.iter().position(|&c| c == 0).unwrap_or(chars.len());
+    let text = String::from_utf16_lossy(&chars[..end]).trim().to_string();
     (!text.is_empty()).then_some(text)
 }
 
@@ -427,7 +613,7 @@ mod tests {
         let p = find(&mut sampler, pid).expect("child listed");
         let target = Target { pid, create_time: p.create_time };
 
-        let facts = Details::default().rows(std::slice::from_ref(&p)).remove(0).facts;
+        let facts = Details::default().rows(std::slice::from_ref(&p), &HashMap::new()).remove(0).facts;
         assert!(facts.user.is_some() && facts.architecture.is_some() && facts.path.is_some());
         assert_eq!(tasks::is_critical(target), Some(false));
 
@@ -435,6 +621,23 @@ mod tests {
         assert!(find(&mut sampler, pid).unwrap().suspended);
         tasks::run(Action::Resume, target).unwrap();
         assert!(!find(&mut sampler, pid).unwrap().suspended);
+
+        tasks::run(Action::Priority(tasks::Priority::BelowNormal), target).unwrap();
+        assert_eq!(find(&mut sampler, pid).unwrap().priority, 6);
+        let mut details = Details::default();
+        let efficiency = |details: &mut Details, sampler: &mut Sampler| {
+            let p = find(sampler, pid).unwrap();
+            details.rows(std::slice::from_ref(&p), &HashMap::new()).remove(0).efficiency
+        };
+        tasks::run(Action::Efficiency(true), target).unwrap();
+        assert!(efficiency(&mut details, &mut sampler));
+        tasks::run(Action::Efficiency(false), target).unwrap();
+        assert!(!efficiency(&mut details, &mut sampler));
+        tasks::run(Action::Affinity(1), target).unwrap();
+        assert_eq!(tasks::affinity(target).map(|(mask, _)| mask), Some(1));
+        let dump = tasks::dump(target, "hwmon-test-ping.exe").unwrap();
+        assert!(std::fs::metadata(&dump).unwrap().len() > 0);
+        std::fs::remove_file(dump).unwrap();
 
         // A wrong start time stands for a reused id and must not be hit.
         let stale = Target { create_time: target.create_time - 1, ..target };

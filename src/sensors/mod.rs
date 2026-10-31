@@ -9,7 +9,7 @@ mod netinfo;
 pub mod nvml;
 mod pdh;
 mod processes;
-pub use processes::Row as ProcessRow;
+pub use processes::{Row as ProcessRow, Virtualization, version_string};
 pub mod system;
 
 /// What a value means — drives formatting and colour in the UI.

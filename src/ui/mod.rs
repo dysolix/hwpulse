@@ -1,6 +1,11 @@
+mod compact;
 mod components;
 mod processes;
+mod services;
+mod startup;
+mod table;
 pub mod theme;
+mod users;
 pub mod widgets;
 pub mod window;
 
@@ -20,6 +25,13 @@ enum Page {
     /// Only a navigation request: the Components page with this [`Group::id`] opened.
     Component(String),
     Processes,
+    /// Only a navigation request: the Processes page with this process selected.
+    Process(u32),
+    Services,
+    /// Only a navigation request: the Services page showing the services in this process.
+    ServicesOf(u32),
+    Startup,
+    Users,
     Settings,
 }
 
@@ -29,6 +41,13 @@ pub struct App {
     settings: Settings,
     components: components::State,
     processes: processes::State,
+    services: services::State,
+    startup: startup::State,
+    users: users::State,
+    /// Window options as last applied, so a changed setting takes effect once.
+    applied: Option<(bool, bool, settings::Speed)>,
+    /// The window size to return to when leaving the compact view.
+    full_size: Option<egui::Vec2>,
     /// Whether this copy starts with Windows; checked (and repaired) at startup.
     autostart: autostart::State,
 }
@@ -44,6 +63,11 @@ impl App {
         let args: Vec<String> = std::env::args().collect();
         let page = match args.windows(2).find(|a| a[0] == "--page").map(|a| a[1].as_str()) {
             Some("processes") => Page::Processes,
+            Some("services") => Page::Services,
+            Some("startup") => Page::Startup,
+            Some("users") => Page::Users,
+            Some("components") => Page::Components,
+            Some("settings") => Page::Settings,
             _ => Page::Dashboard,
         };
         Self {
@@ -52,6 +76,11 @@ impl App {
             settings,
             components: Default::default(),
             processes: Default::default(),
+            services: Default::default(),
+            startup: Default::default(),
+            users: Default::default(),
+            applied: None,
+            full_size: None,
             autostart: autostart::check(),
         }
     }
@@ -67,8 +96,10 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.apply_window_options(ui.ctx());
         let mut model = self.model.lock();
-        model.want_processes = self.page == Page::Processes;
+        // The process list is built only while a page shows it.
+        model.want_processes = !self.settings.compact && matches!(self.page, Page::Processes | Page::Users);
         if !model.want_processes {
             model.processes = None;
         } else if model.processes.is_none() {
@@ -86,21 +117,29 @@ impl eframe::App for App {
         // Navigation requested during this frame; applied after drawing.
         let mut nav: Option<Page> = None;
 
+        if settings.compact {
+            CentralPanel::default().frame(Frame::new().fill(theme::BG).inner_margin(Margin::same(14))).show(ui, |ui| {
+                compact::page(ui, &model, settings);
+            });
+            return;
+        }
+
         CentralPanel::default().frame(Frame::new().fill(theme::BG).inner_margin(Margin::same(22))).show(ui, |ui| {
             header(ui, &model, page, &mut nav);
-            // Settings work without data; everything else waits for the first samples.
-            if model.groups.is_empty() && model.errors.is_empty() && *page != Page::Settings {
+            // These pages work without sensor data; the others wait for the first samples.
+            let independent = matches!(page, Page::Settings | Page::Services | Page::Startup | Page::Users);
+            if model.groups.is_empty() && model.errors.is_empty() && !independent {
                 widgets::waiting(ui, widgets::SENSORS.0, widgets::SENSORS.1);
                 return;
             }
-            if *page == Page::Components {
+            match page {
                 // The list and the details scroll on their own instead of one page scroll.
-                components::page(ui, &model, settings, components);
-                return;
-            }
-            if *page == Page::Processes {
-                processes::page(ui, &model, processes);
-                return;
+                Page::Components => return components::page(ui, &model, settings, components),
+                Page::Processes => return processes::page(ui, &model, settings, processes, &mut nav),
+                Page::Services => return services::page(ui, &mut self.services, &mut nav),
+                Page::Startup => return startup::page(ui, &mut self.startup),
+                Page::Users => return users::page(ui, &model, &mut self.users, &mut nav),
+                _ => {}
             }
             let viewport_height = ui.available_height();
             ScrollArea::vertical().id_salt(format!("{page:?}")).auto_shrink(false).show(ui, |ui| {
@@ -111,10 +150,10 @@ impl eframe::App for App {
                 match page {
                     Page::Dashboard => {
                         dashboard(ui, &model, settings, &mut nav);
-                        footer(ui, viewport_height - (ui.cursor().top() - content_top));
+                        footer(ui, settings, viewport_height - (ui.cursor().top() - content_top));
                     }
                     Page::Settings => settings_page(ui, &model, settings, autostart),
-                    Page::Components | Page::Component(_) | Page::Processes => {}
+                    _ => {}
                 }
             });
         });
@@ -126,9 +165,50 @@ impl eframe::App for App {
                     self.components.open(id);
                     Page::Components
                 }
+                Page::Process(pid) => {
+                    self.processes.focus(pid);
+                    Page::Processes
+                }
+                Page::ServicesOf(pid) => {
+                    self.services.show_pid(pid);
+                    Page::Services
+                }
                 page => page,
             };
             ui.ctx().request_repaint();
+        }
+    }
+}
+
+impl App {
+    /// Sends always-on-top, the compact window size and the update speed to the
+    /// window and poller whenever they differ from what was last applied.
+    fn apply_window_options(&mut self, ctx: &egui::Context) {
+        let s = &self.settings;
+        let wanted = (s.always_on_top, s.compact, s.speed);
+        let previous = self.applied.replace(wanted);
+        if previous == Some(wanted) {
+            return;
+        }
+        let first = previous.is_none();
+        if first || previous.is_some_and(|p| p.0 != s.always_on_top) {
+            let level = if s.always_on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
+        }
+        if first || previous.is_some_and(|p| p.2 != s.speed) {
+            self.model.set_interval(s.speed.interval());
+        }
+        if previous.is_some_and(|p| p.1 != s.compact) || first && s.compact {
+            if s.compact {
+                if !first {
+                    self.full_size = ctx.input(|i| i.viewport().inner_rect).map(|r| r.size());
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(compact::MIN_SIZE));
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(compact::SIZE));
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(vec2(520.0, 420.0)));
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(self.full_size.unwrap_or(vec2(1180.0, 940.0))));
+            }
         }
     }
 }
@@ -154,7 +234,11 @@ fn header(ui: &mut Ui, model: &Model, page: &Page, nav: &mut Option<Page>) {
 
     // "Live" pill on the right.
     let live = !model.groups.is_empty();
-    let (dot, label) = if live { (theme::LIVE, "Live") } else { (theme::TEXT_FAINT, "Idle") };
+    let (dot, label) = match (live, poller::paused()) {
+        (true, true) => (theme::ACCENT, "Paused"),
+        (true, false) => (theme::LIVE, "Live"),
+        (false, _) => (theme::TEXT_FAINT, "Idle"),
+    };
     let galley = p.layout_no_wrap(label.to_owned(), theme::semibold(12.0), theme::TEXT_DIM);
     let pill_w = galley.size().x + 32.0;
     let pill = Rect::from_center_size(rect.right_center() - vec2(pill_w / 2.0, 0.0), vec2(pill_w, 24.0));
@@ -169,6 +253,9 @@ fn header(ui: &mut Ui, model: &Model, page: &Page, nav: &mut Option<Page>) {
         ("Dashboard", Page::Dashboard),
         ("Components", Page::Components),
         ("Processes", Page::Processes),
+        ("Services", Page::Services),
+        ("Startup apps", Page::Startup),
+        ("Users", Page::Users),
         ("Settings", Page::Settings),
     ];
     let font = theme::semibold(12.5);
@@ -541,8 +628,53 @@ fn settings_page(ui: &mut Ui, model: &Model, settings: &mut Settings, autostart:
     ui.add_space(10.0);
 
     dashboard_settings(ui, model, settings);
+    speed_settings(ui, settings);
     chart_settings(ui, settings);
+    window_settings(ui, settings);
     startup_settings(ui, autostart);
+}
+
+fn speed_settings(ui: &mut Ui, settings: &mut Settings) {
+    section_heading(
+        ui,
+        "Update speed",
+        "How often sensors and processes are read. Faster costs more CPU; paused keeps the last values.",
+    );
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        for speed in settings::Speed::ALL {
+            if widgets::chip(ui, speed.label(), settings.speed == speed, true, theme::ACCENT).clicked() {
+                settings.speed = speed;
+            }
+        }
+    });
+    ui.add_space(14.0);
+}
+
+fn window_settings(ui: &mut Ui, settings: &mut Settings) {
+    section_heading(ui, "Window", "How the hwmon window behaves.");
+    ui.add_space(6.0);
+    if switch_card(ui, "Always on top", "Stay above other windows, also in the compact view.", settings.always_on_top) {
+        settings.always_on_top = !settings.always_on_top;
+    }
+    if switch_card(
+        ui,
+        "Minimize on use",
+        "Minimize hwmon after \u{201c}Switch to\u{201d} brings an app to the front.",
+        settings.minimize_on_use,
+    ) {
+        settings.minimize_on_use = !settings.minimize_on_use;
+    }
+    if switch_card(
+        ui,
+        "Compact view",
+        "A small window with just the dashboard's values, like Task Manager's \u{201c}Fewer details\u{201d}.",
+        settings.compact,
+    ) {
+        settings.compact = !settings.compact;
+    }
+    ui.add_space(14.0);
 }
 
 fn chart_settings(ui: &mut Ui, settings: &mut Settings) {
@@ -1006,18 +1138,26 @@ fn link(ui: &mut Ui, text: &str, font: egui::FontId, color: egui::Color32, chevr
 
 /// Sits right below the content, or at the bottom of the window when the content
 /// is shorter than the window. `remaining` is the unused viewport height.
-fn footer(ui: &mut Ui, remaining: f32) {
+fn footer(ui: &mut Ui, settings: &mut Settings, remaining: f32) {
     const HEIGHT: f32 = 22.0;
     ui.add_space((remaining - HEIGHT).max(2.0));
+    let interval = poller::interval().as_secs_f32();
+    let history = (poller::HISTORY_LEN as f32 * interval).round() as u32;
+    let history = if history >= 60 { format!("{} min", history / 60) } else { format!("{history} s") };
+    let text = if poller::paused() {
+        format!("Paused · {history} history")
+    } else {
+        format!("Polling every {interval} s · {history} history")
+    };
     ui.vertical_centered(|ui| {
-        ui.label(
-            egui::RichText::new(format!(
-                "Polling every {} s · {} min history",
-                poller::INTERVAL.as_secs(),
-                poller::HISTORY_LEN as u64 * poller::INTERVAL.as_secs() / 60
-            ))
-            .font(theme::regular(11.5))
-            .color(theme::TEXT_FAINT),
-        );
+        ui.horizontal(|ui| {
+            let link_width = 100.0;
+            let galley = ui.painter().layout_no_wrap(text.clone(), theme::regular(11.5), theme::TEXT_FAINT);
+            ui.add_space(((ui.available_width() - galley.size().x - link_width) / 2.0).max(0.0));
+            ui.label(egui::RichText::new(text).font(theme::regular(11.5)).color(theme::TEXT_FAINT));
+            if link(ui, "Compact view", theme::regular(11.5), theme::TEXT_DIM, false).clicked() {
+                settings.compact = true;
+            }
+        });
     });
 }

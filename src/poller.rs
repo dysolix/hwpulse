@@ -2,6 +2,7 @@
 //! Between ticks nothing runs: the thread sleeps and egui only repaints on request.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -10,7 +11,19 @@ use eframe::egui;
 
 use crate::sensors::{self, Group, ProcessRow};
 
-pub const INTERVAL: Duration = Duration::from_secs(1);
+/// Time between samples, set from the "Update speed" setting.
+static INTERVAL_MS: AtomicU64 = AtomicU64::new(1000);
+static PAUSED: AtomicBool = AtomicBool::new(false);
+
+/// The time between samples; while paused, the one used before.
+pub fn interval() -> Duration {
+    Duration::from_millis(INTERVAL_MS.load(Ordering::Relaxed))
+}
+
+pub fn paused() -> bool {
+    PAUSED.load(Ordering::Relaxed)
+}
+
 /// Samples shown per reading (2 minutes at 1 s). One more is kept, so the oldest
 /// can slide out of the charts while a new one slides in.
 pub const HISTORY_LEN: usize = 120;
@@ -47,6 +60,16 @@ impl Shared {
     /// Lets new samples repaint the window; until then they wait for its first frame.
     pub fn attach(&self, ctx: &egui::Context) {
         let _ = self.ui.set(ctx.clone());
+    }
+
+    /// A new update interval, or `None` to pause; takes effect right away.
+    pub fn set_interval(&self, interval: Option<Duration>) {
+        if let Some(i) = interval {
+            INTERVAL_MS.store(i.as_millis() as u64, Ordering::Relaxed);
+        }
+        PAUSED.store(interval.is_none(), Ordering::Relaxed);
+        let _guard = self.model.lock();
+        self.wake.notify_one();
     }
 
     /// Builds the process list right away instead of at the next tick; call after
@@ -109,22 +132,31 @@ pub fn spawn() -> Shared {
                 }
                 repaint();
 
-                // Sleep until the next tick. When the Processes page opens meanwhile,
-                // build its list from the latest sample right away.
-                let next = Instant::now() + INTERVAL;
+                // Sleep until the next tick (or while paused). When the Processes page
+                // opens meanwhile, build its list from the latest sample right away; when
+                // the update speed changes, wait for the new interval instead.
+                let ticked = Instant::now();
                 let mut m = model.lock().unwrap();
                 loop {
                     let wanted = |m: &mut Model| m.want_processes && m.processes.is_none();
-                    let timeout = next.saturating_duration_since(Instant::now());
-                    let (guard, result) = wake.wait_timeout_while(m, timeout, |m| !wanted(m)).unwrap();
-                    if result.timed_out() {
+                    let (ms, was_paused) = (INTERVAL_MS.load(Ordering::Relaxed), paused());
+                    let timeout = if was_paused {
+                        Duration::from_secs(3600)
+                    } else {
+                        (ticked + Duration::from_millis(ms)).saturating_duration_since(Instant::now())
+                    };
+                    let unchanged = || INTERVAL_MS.load(Ordering::Relaxed) == ms && paused() == was_paused;
+                    let (guard, result) = wake.wait_timeout_while(m, timeout, |m| !wanted(m) && unchanged()).unwrap();
+                    m = guard;
+                    if wanted(&mut m) {
+                        drop(m);
+                        let table = process_table(&mut providers);
+                        m = model.lock().unwrap();
+                        m.processes = Some(table);
+                        repaint();
+                    } else if result.timed_out() && !was_paused {
                         break;
                     }
-                    drop(guard);
-                    let table = process_table(&mut providers);
-                    m = model.lock().unwrap();
-                    m.processes = Some(table);
-                    repaint();
                 }
             }
         })

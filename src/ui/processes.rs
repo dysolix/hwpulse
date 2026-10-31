@@ -1,24 +1,25 @@
 //! Processes page: every running process in a sortable, searchable table, Task
-//! Manager's Details tab. Only the visible rows are laid out and drawn, so hundreds
-//! of processes cost no more than a screenful. Rows can be grouped per executable.
-//! Selected processes can be ended, suspended and resumed; without admin rights that
-//! fails for elevated and SYSTEM processes, and the page offers to restart as admin.
+//! Manager's Processes and Details tabs in one. Only the visible rows are laid out and
+//! drawn, so hundreds of processes cost no more than a screenful. Rows can be grouped
+//! per executable and sorted into Apps, Background and Windows processes; columns can
+//! be picked. Selected processes can be ended (alone or with everything they started),
+//! suspended, resumed, reprioritized, pinned to processors, put into efficiency mode
+//! and dumped. Without admin rights that fails for elevated and SYSTEM processes, and
+//! the page offers to restart as admin.
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
-use eframe::egui::{
-    self, Align2, CornerRadius, CursorIcon, Frame, Key, Margin, Rect, ScrollArea, Sense, Stroke, Ui, pos2, vec2,
-};
+use eframe::egui::{self, Key, ScrollArea, Ui};
 
-use super::{theme, widgets};
+use super::table::{self, Column as _, Job, Notice, Sort};
+use super::{Page, theme, widgets};
 use crate::poller::Model;
 use crate::sensors::{ProcessRow, Unit};
-use crate::tasks::{self, Action, Target};
-
-const ROW: f32 = 28.0;
-const HEADER: f32 = 30.0;
-const PAD: f32 = 10.0;
+use crate::settings::Settings;
+use crate::shell;
+use crate::tasks::{self, Action, Priority, Target};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Column {
@@ -27,16 +28,55 @@ enum Column {
     Status,
     User,
     Cpu,
+    CpuTime,
     Memory,
+    WorkingSet,
+    PeakWorkingSet,
+    Commit,
+    PageFaults,
     Disk,
+    Gpu,
+    GpuMemory,
     Threads,
     Handles,
+    Priority,
+    Session,
+    ParentPid,
     Architecture,
+    Elevated,
+    Virtualization,
     Description,
+    CommandLine,
 }
 
 impl Column {
-    const ALL: [Column; 11] = [
+    const ALL: [Column; 24] = [
+        Column::Name,
+        Column::Pid,
+        Column::Status,
+        Column::User,
+        Column::Cpu,
+        Column::CpuTime,
+        Column::Memory,
+        Column::WorkingSet,
+        Column::PeakWorkingSet,
+        Column::Commit,
+        Column::PageFaults,
+        Column::Disk,
+        Column::Gpu,
+        Column::GpuMemory,
+        Column::Threads,
+        Column::Handles,
+        Column::Priority,
+        Column::Session,
+        Column::ParentPid,
+        Column::Architecture,
+        Column::Elevated,
+        Column::Virtualization,
+        Column::Description,
+        Column::CommandLine,
+    ];
+    const DEFAULT: [Column; 12] = [
         Column::Name,
         Column::Pid,
         Column::Status,
@@ -44,22 +84,102 @@ impl Column {
         Column::Cpu,
         Column::Memory,
         Column::Disk,
+        Column::Gpu,
         Column::Threads,
         Column::Handles,
         Column::Architecture,
         Column::Description,
     ];
-    /// Dropped from the end first when the window gets narrow.
-    const HIDE_ORDER: [Column; 7] = [
+    /// Dropped first when the window gets narrow. Name, PID, CPU and memory always stay.
+    const HIDE_ORDER: [Column; 20] = [
+        Column::CommandLine,
         Column::Description,
+        Column::Virtualization,
+        Column::Elevated,
+        Column::ParentPid,
+        Column::Session,
+        Column::Priority,
         Column::Architecture,
         Column::Handles,
         Column::Threads,
+        Column::PageFaults,
+        Column::PeakWorkingSet,
+        Column::WorkingSet,
+        Column::Commit,
+        Column::CpuTime,
+        Column::GpuMemory,
         Column::User,
         Column::Status,
+        Column::Gpu,
         Column::Disk,
     ];
 
+    /// Stable name in the settings file.
+    fn key(self) -> &'static str {
+        match self {
+            Column::Name => "name",
+            Column::Pid => "pid",
+            Column::Status => "status",
+            Column::User => "user",
+            Column::Cpu => "cpu",
+            Column::CpuTime => "cpu_time",
+            Column::Memory => "memory",
+            Column::WorkingSet => "working_set",
+            Column::PeakWorkingSet => "peak_working_set",
+            Column::Commit => "commit",
+            Column::PageFaults => "page_faults",
+            Column::Disk => "disk",
+            Column::Gpu => "gpu",
+            Column::GpuMemory => "gpu_memory",
+            Column::Threads => "threads",
+            Column::Handles => "handles",
+            Column::Priority => "priority",
+            Column::Session => "session",
+            Column::ParentPid => "parent_pid",
+            Column::Architecture => "architecture",
+            Column::Elevated => "elevated",
+            Column::Virtualization => "virtualization",
+            Column::Description => "description",
+            Column::CommandLine => "command_line",
+        }
+    }
+
+    /// What the column shows, for the column picker.
+    fn hint(self) -> &'static str {
+        match self {
+            Column::Memory => "Private working set: RAM only this process uses",
+            Column::WorkingSet => "All RAM in use, including memory shared with others",
+            Column::Commit => "Memory reserved for it, in RAM or the page file",
+            Column::Gpu => "Load of its busiest GPU engine",
+            Column::GpuMemory => "Dedicated GPU memory",
+            Column::Virtualization => "UAC file and registry virtualization",
+            _ => "",
+        }
+    }
+
+    /// Shown (and sorted) with a group's totals.
+    fn summed(self) -> bool {
+        matches!(
+            self,
+            Column::Cpu
+                | Column::CpuTime
+                | Column::Memory
+                | Column::WorkingSet
+                | Column::PeakWorkingSet
+                | Column::Commit
+                | Column::PageFaults
+                | Column::Disk
+                | Column::Gpu
+                | Column::GpuMemory
+                | Column::Threads
+                | Column::Handles
+                | Column::Status
+                | Column::Name
+        )
+    }
+}
+
+impl table::Column for Column {
     fn title(self) -> &'static str {
         match self {
             Column::Name => "Name",
@@ -67,38 +187,91 @@ impl Column {
             Column::Status => "Status",
             Column::User => "User",
             Column::Cpu => "CPU",
+            Column::CpuTime => "CPU time",
             Column::Memory => "Memory",
+            Column::WorkingSet => "Working set",
+            Column::PeakWorkingSet => "Peak working set",
+            Column::Commit => "Commit",
+            Column::PageFaults => "Page faults",
             Column::Disk => "Disk",
+            Column::Gpu => "GPU",
+            Column::GpuMemory => "GPU memory",
             Column::Threads => "Threads",
             Column::Handles => "Handles",
+            Column::Priority => "Priority",
+            Column::Session => "Session",
+            Column::ParentPid => "Parent",
             Column::Architecture => "Arch",
+            Column::Elevated => "Elevated",
+            Column::Virtualization => "UAC virtualization",
             Column::Description => "Description",
+            Column::CommandLine => "Command line",
         }
     }
 
-    /// Minimum width; Name and Description share whatever is left.
     fn width(self) -> f32 {
         match self {
-            Column::Name => 170.0,
-            Column::Pid => 64.0,
-            Column::Status => 80.0,
+            Column::Name => 160.0,
+            Column::Pid | Column::Cpu | Column::Gpu | Column::Session => 58.0,
+            Column::Status => 76.0,
             Column::User => 110.0,
-            Column::Cpu => 64.0,
-            Column::Memory => 86.0,
-            Column::Disk => 86.0,
-            Column::Threads => 62.0,
-            Column::Handles => 66.0,
-            Column::Architecture => 58.0,
-            Column::Description => 150.0,
+            Column::CpuTime => 78.0,
+            Column::Memory | Column::Disk | Column::WorkingSet | Column::Commit => 80.0,
+            Column::PeakWorkingSet => 118.0,
+            Column::PageFaults => 86.0,
+            Column::GpuMemory => 92.0,
+            Column::Threads => 58.0,
+            Column::Handles | Column::ParentPid => 62.0,
+            Column::Priority => 96.0,
+            Column::Architecture => 52.0,
+            Column::Elevated => 66.0,
+            Column::Virtualization => 132.0,
+            Column::Description => 130.0,
+            Column::CommandLine => 200.0,
         }
     }
 
     fn numeric(self) -> bool {
-        matches!(self, Column::Pid | Column::Cpu | Column::Memory | Column::Disk | Column::Threads | Column::Handles)
+        matches!(
+            self,
+            Column::Pid
+                | Column::Cpu
+                | Column::CpuTime
+                | Column::Memory
+                | Column::WorkingSet
+                | Column::PeakWorkingSet
+                | Column::Commit
+                | Column::PageFaults
+                | Column::Disk
+                | Column::Gpu
+                | Column::GpuMemory
+                | Column::Threads
+                | Column::Handles
+                | Column::Session
+                | Column::ParentPid
+        )
     }
 
     fn flexible(self) -> bool {
-        matches!(self, Column::Name | Column::Description)
+        matches!(self, Column::Name | Column::Description | Column::CommandLine)
+    }
+}
+
+/// Task Manager's sections: programs with a window, everything else, and Windows itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum Category {
+    Apps,
+    Background,
+    Windows,
+}
+
+impl Category {
+    fn title(self) -> &'static str {
+        match self {
+            Category::Apps => "Apps",
+            Category::Background => "Background processes",
+            Category::Windows => "Windows processes",
+        }
     }
 }
 
@@ -112,46 +285,91 @@ enum Selected {
 
 /// An action waiting for confirmation in a dialog.
 struct Pending {
-    action: Action,
+    kind: Confirm,
+    /// In the order to act on them (a tree's children before their parent).
     targets: Vec<Target>,
     label: String,
     critical: bool,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Confirm {
+    End,
+    EndTree,
+    Suspend,
+    Realtime,
+}
+
+struct AffinityEdit {
+    target: Target,
+    label: String,
+    mask: u64,
+    available: u64,
+}
+
+struct RunDialog {
+    command: String,
+    admin: bool,
+    error: Option<String>,
+    focus: bool,
+}
+
 pub struct State {
     query: String,
-    sort: Column,
-    descending: bool,
+    sort: Sort<Column>,
     grouped: bool,
+    categories: bool,
     /// Lowercase names of expanded groups.
     expanded: HashSet<String>,
+    collapsed: HashSet<Category>,
     selected: Option<Selected>,
     pending: Option<Pending>,
-    /// Result of the last action; `true` when it failed for lack of rights.
-    message: Option<(String, bool)>,
-    elevated: bool,
+    affinity: Option<AffinityEdit>,
+    run: Option<RunDialog>,
+    dump: Option<(String, Job<Result<PathBuf, tasks::Error>>)>,
+    notice: Option<Notice>,
+    /// Services hosted by the process the context menu is open for.
+    menu_services: Option<(u32, Vec<String>)>,
+    /// Select this process and scroll to it once it is listed ("Go to details").
+    focus: Option<u32>,
+    scroll_to: Option<usize>,
 }
 
 impl Default for State {
     fn default() -> Self {
         Self {
             query: String::new(),
-            sort: Column::Cpu,
-            descending: true,
+            sort: Sort { column: Column::Cpu, descending: true },
             grouped: false,
+            categories: false,
             expanded: HashSet::new(),
+            collapsed: HashSet::new(),
             selected: None,
             pending: None,
-            message: None,
-            elevated: tasks::is_elevated(),
+            affinity: None,
+            run: None,
+            dump: None,
+            notice: None,
+            menu_services: None,
+            focus: None,
+            scroll_to: None,
         }
     }
 }
 
-/// One line of the table: a process, or several processes of one executable.
+impl State {
+    /// Shows the process with this id the next time the page is drawn.
+    pub fn focus(&mut self, pid: u32) {
+        self.focus = Some(pid);
+        self.query.clear();
+    }
+}
+
+/// One line of the table.
 enum Line<'a> {
-    Process { row: &'a ProcessRow, child: bool },
-    Group { key: String, rows: Vec<&'a ProcessRow> },
+    Category { category: Category, count: usize },
+    Group { key: String, rows: Vec<&'a ProcessRow>, depth: u8 },
+    Process { row: &'a ProcessRow, depth: u8 },
 }
 
 impl Line<'_> {
@@ -159,13 +377,15 @@ impl Line<'_> {
         match self {
             Line::Process { row, .. } => vec![row],
             Line::Group { rows, .. } => rows.clone(),
+            Line::Category { .. } => Vec::new(),
         }
     }
 
-    fn selection(&self) -> Selected {
+    fn selection(&self) -> Option<Selected> {
         match self {
-            Line::Process { row, .. } => Selected::Process(target(row)),
-            Line::Group { key, .. } => Selected::Group(key.clone()),
+            Line::Process { row, .. } => Some(Selected::Process(target(row))),
+            Line::Group { key, .. } => Some(Selected::Group(key.clone())),
+            Line::Category { .. } => None,
         }
     }
 }
@@ -174,11 +394,52 @@ fn target(row: &ProcessRow) -> Target {
     Target { pid: row.process.pid, create_time: row.process.create_time }
 }
 
-pub fn page(ui: &mut Ui, model: &Model, state: &mut State) {
+fn shown_columns(settings: &Settings) -> Vec<Column> {
+    if settings.process_columns.is_empty() {
+        return Column::DEFAULT.to_vec();
+    }
+    let mut columns: Vec<Column> =
+        Column::ALL.into_iter().filter(|c| settings.process_columns.iter().any(|k| k == c.key())).collect();
+    if !columns.contains(&Column::Name) {
+        columns.insert(0, Column::Name);
+    }
+    columns
+}
+
+pub fn page(ui: &mut Ui, model: &Model, settings: &mut Settings, state: &mut State, nav: &mut Option<Page>) {
+    if let Some((name, job)) = &state.dump
+        && let Some(result) = job.take()
+    {
+        state.notice = Some(match result {
+            Ok(path) => {
+                let path = path.display().to_string();
+                Notice { text: format!("Dump file of {name} written to {path}"), denied: false, reveal: Some(path) }
+            }
+            Err(tasks::Error::AccessDenied) => Notice::denied(format!("Access denied: could not dump {name}.")),
+            Err(tasks::Error::Gone) => Notice::info(format!("{name} has ended.")),
+            Err(tasks::Error::Other(e)) => Notice::info(format!("Could not dump {name}: {e}")),
+        });
+        state.dump = None;
+    }
+
     let Some(rows) = &model.processes else {
         widgets::waiting(ui, "Listing processes…", "Reading names, users and descriptions of every running process");
         return;
     };
+
+    let categories = categorize(rows);
+    let focused = state.focus.is_some();
+    if let Some(pid) = state.focus.take() {
+        match rows.iter().find(|r| r.process.pid == pid) {
+            Some(row) => {
+                state.selected = Some(Selected::Process(target(row)));
+                let key = row.process.name.to_lowercase();
+                state.collapsed.remove(&categories[&key]);
+                state.expanded.insert(key);
+            }
+            None => state.notice = Some(Notice::info(format!("No process with ID {pid} is running."))),
+        }
+    }
 
     let query = state.query.trim().to_lowercase();
     let matches = |r: &ProcessRow| {
@@ -187,17 +448,17 @@ pub fn page(ui: &mut Ui, model: &Model, state: &mut State) {
             || r.process.pid.to_string().starts_with(&query)
             || r.facts.user.as_ref().is_some_and(|u| u.to_lowercase().contains(&query))
             || r.facts.description.as_ref().is_some_and(|d| d.to_lowercase().contains(&query))
+            || r.window.as_ref().is_some_and(|w| w.title.to_lowercase().contains(&query))
     };
     let mut visible: Vec<&ProcessRow> = rows.iter().filter(|r| matches(r)).collect();
-    let (sort, descending) = (state.sort, state.descending);
+    let sort = state.sort;
     let order = |a: &ProcessRow, b: &ProcessRow| {
-        let o = compare(sort, a, b);
-        let o = if descending { o.reverse() } else { o };
-        o.then_with(|| a.process.name.to_lowercase().cmp(&b.process.name.to_lowercase()))
+        sort.apply(compare(sort.column, a, b))
+            .then_with(|| a.process.name.to_lowercase().cmp(&b.process.name.to_lowercase()))
             .then(a.process.pid.cmp(&b.process.pid))
     };
     visible.sort_by(|a, b| order(a, b));
-    let lines = lines(&visible, state, &order);
+    let lines = lines(&visible, state, &categories, &order);
 
     // Forget a selection whose processes ended.
     let selected_rows: Vec<&ProcessRow> = match &state.selected {
@@ -208,57 +469,118 @@ pub fn page(ui: &mut Ui, model: &Model, state: &mut State) {
     if selected_rows.is_empty() {
         state.selected = None;
     }
-
-    toolbar(ui, state, rows.len(), visible.len(), &selected_rows);
-    if let Some((text, denied)) = state.message.clone() {
-        message(ui, state, &text, denied);
+    if focused && let Some(Selected::Process(t)) = &state.selected {
+        state.scroll_to = lines.iter().position(|l| matches!(l, Line::Process { row, .. } if target(row) == *t));
     }
+
+    toolbar(ui, settings, state, rows.len(), visible.len(), &selected_rows);
+    table::notice(ui, &mut state.notice, "processes");
 
     let (delete, escape) = ui.input(|i| (i.key_pressed(Key::Delete), i.key_pressed(Key::Escape)));
-    if delete && !selected_rows.is_empty() && state.pending.is_none() {
-        request(state, Action::End, &selected_rows);
+    let dialog_open = state.pending.is_some() || state.affinity.is_some() || state.run.is_some();
+    if delete && !selected_rows.is_empty() && !dialog_open {
+        request_end(state, &selected_rows, false, rows);
     }
-    if escape && state.pending.is_none() {
+    if escape && !dialog_open {
         state.selected = None;
     }
 
-    table(ui, state, &lines);
+    let columns = shown_columns(settings);
+    table::card(ui, |ui| {
+        let columns = table::layout(&columns, &Column::HIDE_ORDER, ui.available_width() - 12.0);
+        table::header(ui, &mut state.sort, &columns);
+        let mut area = ScrollArea::vertical().id_salt("processes").auto_shrink(false);
+        if let Some(index) = state.scroll_to.take() {
+            area = area.vertical_scroll_offset((index as f32 - 4.0).max(0.0) * table::ROW);
+        }
+        area.show_rows(ui, table::ROW, lines.len(), |ui, range| {
+            for line in &lines[range] {
+                row(ui, settings, state, line, &columns, rows, nav);
+            }
+        });
+    });
+
     confirm(ui, state);
+    affinity_dialog(ui, state);
+    run_dialog(ui, state);
 }
 
-/// Groups per executable when switched on; a group of one stays a plain row.
+/// Category per lowercase executable name. An executable with any window is an app,
+/// with all its processes (browser helpers belong to the browser); one that lives in
+/// the Windows folder (or whose path is hidden, like System) is part of Windows.
+fn categorize(rows: &[ProcessRow]) -> HashMap<String, Category> {
+    let windows_dir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()).to_lowercase() + "\\";
+    let mut categories: HashMap<String, Category> = HashMap::new();
+    for r in rows {
+        let own = if r.window.is_some() {
+            Category::Apps
+        } else if r.facts.path.as_ref().is_none_or(|p| p.to_lowercase().starts_with(&windows_dir)) {
+            Category::Windows
+        } else {
+            Category::Background
+        };
+        let entry = categories.entry(r.process.name.to_lowercase()).or_insert(own);
+        // Apps wins over Background, which wins over Windows.
+        *entry = (*entry).min(own);
+    }
+    categories
+}
+
+/// Sections when sorted into categories, groups per executable when grouped; a group
+/// of one stays a plain row.
 fn lines<'a>(
     visible: &[&'a ProcessRow],
     state: &State,
+    categories: &HashMap<String, Category>,
     order: &dyn Fn(&ProcessRow, &ProcessRow) -> Ordering,
 ) -> Vec<Line<'a>> {
-    if !state.grouped {
-        return visible.iter().map(|&row| Line::Process { row, child: false }).collect();
-    }
-    let mut groups: Vec<(String, Vec<&ProcessRow>)> = Vec::new();
-    for &row in visible {
-        let key = row.process.name.to_lowercase();
-        match groups.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, rows)) => rows.push(row),
-            None => groups.push((key, vec![row])),
-        }
-    }
-    // Groups by their total, using a stand-in row that holds the sums.
-    let totals: Vec<ProcessRow> = groups.iter().map(|(_, rows)| sum(rows)).collect();
-    let mut indices: Vec<usize> = (0..groups.len()).collect();
-    indices.sort_by(|&a, &b| order(&totals[a], &totals[b]));
+    let sections: Vec<(Option<Category>, Vec<&ProcessRow>)> = if state.categories {
+        [Category::Apps, Category::Background, Category::Windows]
+            .into_iter()
+            .map(|c| {
+                (Some(c), visible.iter().copied().filter(|r| categories[&r.process.name.to_lowercase()] == c).collect())
+            })
+            .filter(|(_, rows): &(_, Vec<_>)| !rows.is_empty())
+            .collect()
+    } else {
+        vec![(None, visible.to_vec())]
+    };
 
     let mut lines = Vec::new();
-    for i in indices {
-        let (key, rows) = &groups[i];
-        if rows.len() == 1 {
-            lines.push(Line::Process { row: rows[0], child: false });
+    for (category, rows) in sections {
+        let depth = category.is_some() as u8;
+        if let Some(category) = category {
+            lines.push(Line::Category { category, count: rows.len() });
+            if state.collapsed.contains(&category) {
+                continue;
+            }
+        }
+        if !state.grouped {
+            lines.extend(rows.iter().map(|&row| Line::Process { row, depth }));
             continue;
         }
-        let open = state.expanded.contains(key);
-        lines.push(Line::Group { key: key.clone(), rows: rows.clone() });
-        if open {
-            lines.extend(rows.iter().map(|&row| Line::Process { row, child: true }));
+        let mut groups: Vec<(String, Vec<&ProcessRow>)> = Vec::new();
+        for &row in &rows {
+            let key = row.process.name.to_lowercase();
+            match groups.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, rows)) => rows.push(row),
+                None => groups.push((key, vec![row])),
+            }
+        }
+        // Groups by their total, using a stand-in row that holds the sums.
+        let totals: Vec<ProcessRow> = groups.iter().map(|(_, rows)| sum(rows)).collect();
+        let mut indices: Vec<usize> = (0..groups.len()).collect();
+        indices.sort_by(|&a, &b| order(&totals[a], &totals[b]));
+        for i in indices {
+            let (key, rows) = &groups[i];
+            if rows.len() == 1 {
+                lines.push(Line::Process { row: rows[0], depth });
+                continue;
+            }
+            lines.push(Line::Group { key: key.clone(), rows: rows.clone(), depth });
+            if state.expanded.contains(key) {
+                lines.extend(rows.iter().map(|&row| Line::Process { row, depth: depth + 1 }));
+            }
         }
     }
     lines
@@ -267,13 +589,23 @@ fn lines<'a>(
 /// A row with the summed values of `rows`, for sorting and showing a group.
 fn sum(rows: &[&ProcessRow]) -> ProcessRow {
     let mut total = rows[0].clone();
+    let total_of = |f: fn(&ProcessRow) -> u64| rows.iter().map(|r| f(r)).sum::<u64>();
     let p = &mut total.process;
     p.cpu = rows.iter().map(|r| r.process.cpu).sum();
-    p.private_bytes = rows.iter().map(|r| r.process.private_bytes).sum();
+    p.cpu_time = rows.iter().map(|r| r.process.cpu_time).sum();
+    p.private_bytes = total_of(|r| r.process.private_bytes);
+    p.working_set = total_of(|r| r.process.working_set);
+    p.peak_working_set = total_of(|r| r.process.peak_working_set);
+    p.commit = total_of(|r| r.process.commit);
+    p.page_faults = rows.iter().map(|r| r.process.page_faults).sum();
     p.io_bytes_per_sec = rows.iter().map(|r| r.process.io_bytes_per_sec).sum();
     p.threads = rows.iter().map(|r| r.process.threads).sum();
     p.handles = rows.iter().map(|r| r.process.handles).sum();
     p.suspended = rows.iter().all(|r| r.process.suspended);
+    total.gpu.load = rows.iter().map(|r| r.gpu.load).sum::<f64>().min(100.0);
+    total.gpu.memory = total_of(|r| r.gpu.memory);
+    total.efficiency = rows.iter().all(|r| r.efficiency);
+    total.window = rows.iter().find_map(|r| r.window.clone());
     total
 }
 
@@ -285,343 +617,492 @@ fn compare(column: Column, a: &ProcessRow, b: &ProcessRow) -> Ordering {
     match column {
         Column::Name => pa.name.to_lowercase().cmp(&pb.name.to_lowercase()),
         Column::Pid => pa.pid.cmp(&pb.pid),
-        Column::Status => pa.suspended.cmp(&pb.suspended),
+        Column::Status => status(a).cmp(status(b)),
         Column::User => text(&a.facts.user, &b.facts.user),
         Column::Cpu => pa.cpu.total_cmp(&pb.cpu),
+        Column::CpuTime => pa.cpu_time.cmp(&pb.cpu_time),
         Column::Memory => pa.private_bytes.cmp(&pb.private_bytes),
+        Column::WorkingSet => pa.working_set.cmp(&pb.working_set),
+        Column::PeakWorkingSet => pa.peak_working_set.cmp(&pb.peak_working_set),
+        Column::Commit => pa.commit.cmp(&pb.commit),
+        Column::PageFaults => pa.page_faults.cmp(&pb.page_faults),
         Column::Disk => pa.io_bytes_per_sec.total_cmp(&pb.io_bytes_per_sec),
+        Column::Gpu => a.gpu.load.total_cmp(&b.gpu.load),
+        Column::GpuMemory => a.gpu.memory.cmp(&b.gpu.memory),
         Column::Threads => pa.threads.cmp(&pb.threads),
         Column::Handles => pa.handles.cmp(&pb.handles),
+        Column::Priority => pa.priority.cmp(&pb.priority),
+        Column::Session => pa.session_id.cmp(&pb.session_id),
+        Column::ParentPid => pa.parent_pid.cmp(&pb.parent_pid),
         Column::Architecture => a.facts.architecture.cmp(&b.facts.architecture),
+        Column::Elevated => a.facts.elevated.cmp(&b.facts.elevated),
+        Column::Virtualization => a.facts.virtualization.cmp(&b.facts.virtualization),
         Column::Description => text(&a.facts.description, &b.facts.description),
+        Column::CommandLine => text(&a.facts.command_line, &b.facts.command_line),
+    }
+}
+
+fn status(row: &ProcessRow) -> &'static str {
+    if row.process.suspended {
+        "Suspended"
+    } else if row.efficiency {
+        "Efficiency mode"
+    } else {
+        "Running"
     }
 }
 
 // ---------------------------------------------------------------------------
 // Toolbar
 
-fn toolbar(ui: &mut Ui, state: &mut State, total: usize, shown: usize, selected: &[&ProcessRow]) {
+fn toolbar(
+    ui: &mut Ui,
+    settings: &mut Settings,
+    state: &mut State,
+    total: usize,
+    shown: usize,
+    selected: &[&ProcessRow],
+) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
-        ui.add(
-            egui::TextEdit::singleline(&mut state.query)
-                .hint_text("Search name, PID, user or description")
-                .desired_width(280.0)
-                .font(theme::regular(13.0))
-                .frame(
-                    Frame::new()
-                        .fill(theme::SURFACE)
-                        .stroke(Stroke::new(1.0, theme::BORDER))
-                        .corner_radius(CornerRadius::same(8))
-                        .inner_margin(Margin::symmetric(10, 6)),
-                ),
-        );
+        table::search(ui, &mut state.query, "Search name, PID, user, description or window", 250.0);
         if widgets::chip(ui, "Group by app", state.grouped, true, theme::ACCENT).clicked() {
             state.grouped = !state.grouped;
         }
-        let count = if shown == total { format!("{total} processes") } else { format!("{shown} of {total}") };
-        ui.label(egui::RichText::new(count).font(theme::regular(12.5)).color(theme::TEXT_FAINT));
+        if widgets::chip(ui, "Sort by type", state.categories, true, theme::ACCENT).clicked() {
+            state.categories = !state.categories;
+        }
+        columns_menu(ui, settings);
+        table::count(ui, if shown == total { format!("{total} processes") } else { format!("{shown} of {total}") });
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let any = !selected.is_empty();
-            if button(ui, "End task", any, true).clicked() {
-                request(state, Action::End, selected);
+            if table::button(ui, "End task", any, true).clicked() {
+                request_end(state, selected, false, &[]);
             }
             let suspended = any && selected.iter().all(|r| r.process.suspended);
             let (label, action) = if suspended { ("Resume", Action::Resume) } else { ("Suspend", Action::Suspend) };
-            if button(ui, label, any, false).clicked() {
+            if table::button(ui, label, any, false).clicked() {
                 request(state, action, selected);
             }
-            if state.elevated {
-                ui.label(egui::RichText::new("Administrator").font(theme::semibold(12.0)).color(theme::LIVE));
+            let efficient = any && selected.iter().all(|r| r.efficiency);
+            let label = if efficient { "Leave efficiency mode" } else { "Efficiency mode" };
+            if table::button(ui, label, any, false).clicked() {
+                request(state, Action::Efficiency(!efficient), selected);
             }
+            if table::button(ui, "Run new task", true, false).clicked() {
+                state.run = Some(RunDialog { command: String::new(), admin: false, error: None, focus: true });
+            }
+            table::admin_badge(ui);
         });
     });
     ui.add_space(-2.0);
 }
 
-fn button(ui: &mut Ui, label: &str, enabled: bool, danger: bool) -> egui::Response {
-    let font = theme::semibold(12.5);
-    let galley = ui.painter().layout_no_wrap(label.to_owned(), font, theme::TEXT);
-    let size = vec2(galley.size().x + 28.0, 30.0);
-    let (rect, response) = ui.allocate_exact_size(size, if enabled { Sense::click() } else { Sense::hover() });
-    let hovered = enabled && response.hovered();
-    let (fill, text) = match (enabled, danger) {
-        (false, _) => (theme::SURFACE, theme::TEXT_FAINT),
-        (true, true) => (theme::ERROR.gamma_multiply(if hovered { 0.35 } else { 0.22 }), theme::TEXT),
-        (true, false) => (if hovered { theme::RAISED } else { theme::SURFACE }, theme::TEXT),
-    };
-    ui.painter().rect(rect, CornerRadius::same(8), fill, Stroke::new(1.0, theme::BORDER), egui::StrokeKind::Inside);
-    ui.painter().galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, text);
-    if enabled { response.on_hover_cursor(CursorIcon::PointingHand) } else { response }
-}
-
-/// The outcome of the last action, with a way to retry as administrator.
-fn message(ui: &mut Ui, state: &mut State, text: &str, denied: bool) {
-    Frame::new()
-        .fill(if denied { theme::ERROR.gamma_multiply(0.12) } else { theme::SURFACE })
-        .stroke(Stroke::new(1.0, if denied { theme::ERROR.gamma_multiply(0.5) } else { theme::BORDER }))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::symmetric(12, 8))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(text).font(theme::regular(12.5)).color(theme::TEXT));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if super::link(ui, "Dismiss", theme::regular(12.5), theme::TEXT_DIM, false).clicked() {
-                        state.message = None;
-                    }
-                    if denied
-                        && !state.elevated
-                        && super::link(ui, "Restart as administrator", theme::semibold(12.5), theme::ACCENT, true)
-                            .clicked()
-                    {
-                        if tasks::restart_as_admin("processes") {
-                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                        } else {
-                            state.message = Some(("The administrator prompt was declined.".into(), false));
-                        }
-                    }
-                });
-            });
-        });
+/// "Columns" button with a checkbox per column; changes apply and persist at once.
+fn columns_menu(ui: &mut Ui, settings: &mut Settings) {
+    let response = table::button(ui, "Columns", true, false);
+    egui::Popup::menu(&response).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+        ui.set_min_width(220.0);
+        let mut shown = shown_columns(settings);
+        let mut changed = false;
+        for column in Column::ALL.into_iter().filter(|c| *c != Column::Name) {
+            let mut on = shown.contains(&column);
+            let response = ui.checkbox(&mut on, column.title());
+            let hint = column.hint();
+            let response = if hint.is_empty() { response } else { response.on_hover_text(hint) };
+            if response.changed() {
+                if on {
+                    shown.push(column);
+                } else {
+                    shown.retain(|c| *c != column);
+                }
+                changed = true;
+            }
+        }
+        ui.separator();
+        if ui.button("Default columns").clicked() {
+            settings.process_columns.clear();
+        } else if changed {
+            settings.process_columns = Column::ALL
+                .into_iter()
+                .filter(|c| *c == Column::Name || shown.contains(c))
+                .map(|c| c.key().to_owned())
+                .collect();
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
 // Table
 
-/// Visible columns with their widths for the available `width`.
-fn layout(width: f32) -> Vec<(Column, f32)> {
-    let mut columns: Vec<Column> = Column::ALL.to_vec();
-    let needed = |cols: &[Column]| cols.iter().map(|c| c.width()).sum::<f32>() + PAD * cols.len() as f32;
-    for hide in Column::HIDE_ORDER {
-        if needed(&columns) <= width {
-            break;
-        }
-        columns.retain(|c| *c != hide);
-    }
-    let extra = (width - needed(&columns)).max(0.0);
-    let flexible = columns.iter().filter(|c| c.flexible()).count().max(1) as f32;
-    columns.into_iter().map(|c| (c, c.width() + if c.flexible() { extra / flexible } else { 0.0 })).collect()
-}
-
-fn table(ui: &mut Ui, state: &mut State, lines: &[Line]) {
-    let full = ui.available_rect_before_wrap();
-    Frame::new()
-        .fill(theme::SURFACE)
-        .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(CornerRadius::same(theme::CARD_RADIUS))
-        .inner_margin(Margin::symmetric(6, 4))
-        .show(ui, |ui| {
-            ui.set_min_size(full.size() - vec2(14.0, 10.0));
-            let columns = layout(ui.available_width() - 12.0);
-            ui.spacing_mut().item_spacing.y = 0.0;
-            header(ui, state, &columns);
-            ScrollArea::vertical().id_salt("processes").auto_shrink(false).show_rows(
-                ui,
-                ROW,
-                lines.len(),
-                |ui, range| {
-                    for line in &lines[range] {
-                        row(ui, state, line, &columns);
-                    }
-                },
-            );
-        });
-}
-
-fn header(ui: &mut Ui, state: &mut State, columns: &[(Column, f32)]) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER), Sense::hover());
-    ui.painter().hline(rect.x_range(), rect.bottom(), Stroke::new(1.0, theme::BORDER));
-    let mut x = rect.left() + PAD;
-    for &(column, width) in columns {
-        let cell = Rect::from_min_size(pos2(x, rect.top()), vec2(width, HEADER));
-        x += width + PAD;
-        let response = ui
-            .interact(cell, ui.scope_id().with(("header", column)), Sense::click())
-            .on_hover_cursor(CursorIcon::PointingHand);
-        if response.clicked() {
-            if state.sort == column {
-                state.descending = !state.descending;
-            } else {
-                state.sort = column;
-                state.descending = column.numeric() && column != Column::Pid;
-            }
-        }
-        let active = state.sort == column;
-        let mut title = column.title().to_owned();
-        if active {
-            title += if state.descending { "  ↓" } else { "  ↑" };
-        }
-        let color = if active || response.hovered() { theme::TEXT } else { theme::TEXT_DIM };
-        let (anchor, align) = cell_anchor(cell, column);
-        ui.painter().text(anchor, align, title, theme::semibold(12.0), color);
-    }
-}
-
-fn cell_anchor(cell: Rect, column: Column) -> (egui::Pos2, Align2) {
-    if column.numeric() {
-        (cell.right_center(), Align2::RIGHT_CENTER)
-    } else {
-        (cell.left_center(), Align2::LEFT_CENTER)
-    }
-}
-
-fn row(ui: &mut Ui, state: &mut State, line: &Line, columns: &[(Column, f32)]) {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
+fn row(
+    ui: &mut Ui,
+    settings: &Settings,
+    state: &mut State,
+    line: &Line,
+    columns: &[(Column, f32)],
+    all: &[ProcessRow],
+    nav: &mut Option<Page>,
+) {
     let selection = line.selection();
-    let selected = state.selected.as_ref() == Some(&selection);
-    let painter = ui.painter_at(rect);
-    if selected {
-        painter.rect_filled(rect, CornerRadius::same(6), theme::ACCENT.gamma_multiply(0.16));
-    } else if response.hovered() {
-        painter.rect_filled(rect, CornerRadius::same(6), theme::RAISED);
+    let selected = selection.is_some() && state.selected == selection;
+    let (rect, response, painter) = table::row(ui, selected);
+
+    if let Line::Category { category, count } = line {
+        if response.clicked() && !state.collapsed.remove(category) {
+            state.collapsed.insert(*category);
+        }
+        let open = !state.collapsed.contains(category);
+        let cell = rect.shrink2(egui::vec2(table::PAD, 0.0));
+        table::name(&painter, cell, &format!("{}  ({count})", category.title()), 0, Some(open), true);
+        return;
     }
+    let selection = selection.expect("not a category");
 
     if response.clicked() || response.secondary_clicked() {
         state.selected = Some(selection.clone());
     }
+    let depth = match line {
+        Line::Group { depth, .. } | Line::Process { depth, .. } => *depth,
+        Line::Category { .. } => 0,
+    };
     if let Line::Group { key, .. } = line
-        && (response.double_clicked() || response.clicked() && chevron_hit(ui, rect))
+        && (response.double_clicked() || response.clicked() && table::chevron_hit(ui, rect, depth))
         && !state.expanded.remove(key)
     {
         state.expanded.insert(key.clone());
     }
+    if let (Line::Process { row, .. }, true) = (line, response.double_clicked())
+        && let Some(window) = &row.window
+    {
+        switch_to(ui, settings, window.hwnd);
+    }
     response.context_menu(|ui| {
         state.selected = Some(selection.clone());
-        let rows = line.rows();
-        let suspended = rows.iter().all(|r| r.process.suspended);
-        if ui.button("End task").clicked() {
-            request(state, Action::End, &rows);
-            ui.close();
-        }
-        let (label, action) = if suspended { ("Resume", Action::Resume) } else { ("Suspend", Action::Suspend) };
-        if ui.button(label).clicked() {
-            request(state, action, &rows);
-            ui.close();
-        }
-        if ui.button("Copy name").clicked() {
-            ui.ctx().copy_text(rows[0].process.name.clone());
-            ui.close();
-        }
-        if let Some(path) = rows[0].facts.path.clone()
-            && ui.button("Copy path").clicked()
-        {
-            ui.ctx().copy_text(path);
-            ui.close();
-        }
+        context_menu(ui, settings, state, &line.rows(), all, nav);
     });
 
-    let (rows, child) = match line {
-        Line::Process { row, child } => (vec![*row], *child),
-        Line::Group { rows, .. } => (rows.clone(), false),
+    let (rows, group) = match line {
+        Line::Process { row, .. } => (vec![*row], false),
+        Line::Group { rows, .. } => (rows.clone(), true),
+        Line::Category { .. } => unreachable!(),
     };
-    let group = matches!(line, Line::Group { .. });
     let shown = if group { sum(&rows) } else { rows[0].clone() };
     let (p, f) = (&shown.process, &shown.facts);
+    let elevated_column = columns.iter().any(|(c, _)| *c == Column::Elevated);
 
-    let mut x = rect.left() + PAD;
-    for &(column, width) in columns {
-        let cell = Rect::from_min_size(pos2(x, rect.top()), vec2(width, ROW));
-        x += width + PAD;
+    for (column, cell) in table::cells(rect, columns) {
         let faint = |s: &str| (s.to_owned(), theme::TEXT_FAINT);
+        let dim = |s: String| (s, theme::TEXT_DIM);
+        let mib = |bytes: u64| (widgets::format_value(bytes as f64 / 1048576.0, Unit::Mebibytes), theme::TEXT);
+        // A group shows other values (user, description …) only when all its processes share them.
+        if group && !column.summed() && rows.iter().any(|r| compare(column, r, rows[0]) != Ordering::Equal) {
+            continue;
+        }
         let (text, color) = match column {
             Column::Name => {
-                let mut left = cell.left();
-                if child {
-                    left += 22.0;
-                }
-                if let Line::Group { key, .. } = line {
-                    chevron(&painter, pos2(left + 5.0, cell.center().y), state.expanded.contains(key));
-                    left += 18.0;
-                }
                 let name = if group { format!("{}  ×{}", p.name, rows.len()) } else { p.name.clone() };
-                let font = if group { theme::semibold(13.0) } else { theme::regular(13.0) };
-                let galley = widgets::elided(&painter, &name, font, theme::TEXT, cell.right() - left);
-                painter.galley(pos2(left, cell.center().y - galley.size().y / 2.0), galley, theme::TEXT);
+                let chevron = match line {
+                    Line::Group { key, .. } => Some(state.expanded.contains(key)),
+                    _ => None,
+                };
+                table::name(&painter, cell, &name, depth, chevron, group);
                 continue;
             }
-            Column::Pid if group => faint(""),
-            Column::Pid => (p.pid.to_string(), theme::TEXT_DIM),
-            Column::Status if p.suspended => ("Suspended".into(), theme::ACCENT),
-            Column::Status => ("Running".into(), theme::TEXT_DIM),
+            Column::Pid => dim(p.pid.to_string()),
+            Column::Status => match status(&shown) {
+                "Suspended" => ("Suspended".into(), theme::ACCENT),
+                "Efficiency mode" => ("Efficiency".into(), theme::LIVE),
+                s => dim(s.into()),
+            },
             Column::User => match (&f.user, f.elevated) {
-                (Some(user), Some(true)) => (format!("{user} · admin"), theme::TEXT_DIM),
-                (Some(user), _) => (user.clone(), theme::TEXT_DIM),
+                (Some(user), Some(true)) if !elevated_column => dim(format!("{user} · admin")),
+                (Some(user), _) => dim(user.clone()),
                 (None, _) => faint("—"),
             },
             Column::Cpu if p.cpu < 0.05 => faint("0"),
             Column::Cpu => (format!("{:.1}%", p.cpu), theme::accent(Unit::Percent, p.cpu * 4.0)),
-            Column::Memory => (widgets::format_value(p.private_bytes as f64 / 1048576.0, Unit::Mebibytes), theme::TEXT),
+            Column::CpuTime => dim(cpu_time(p.cpu_time)),
+            Column::Memory => mib(p.private_bytes),
+            Column::WorkingSet => mib(p.working_set),
+            Column::PeakWorkingSet => mib(p.peak_working_set),
+            Column::Commit => mib(p.commit),
+            Column::PageFaults => dim(thousands(p.page_faults as u64)),
             Column::Disk if p.io_bytes_per_sec < 512.0 => faint("0"),
             Column::Disk => (widgets::format_value(p.io_bytes_per_sec, Unit::BytesPerSec), theme::TEXT),
-            Column::Threads => (p.threads.to_string(), theme::TEXT_DIM),
-            Column::Handles => (p.handles.to_string(), theme::TEXT_DIM),
+            Column::Gpu if shown.gpu.load < 0.05 => faint("0"),
+            Column::Gpu => (format!("{:.1}%", shown.gpu.load), theme::accent(Unit::Percent, shown.gpu.load * 2.0)),
+            Column::GpuMemory if shown.gpu.memory == 0 => faint("0"),
+            Column::GpuMemory => mib(shown.gpu.memory),
+            Column::Threads => dim(p.threads.to_string()),
+            Column::Handles => dim(p.handles.to_string()),
+            Column::Priority => match Priority::from_base(p.priority) {
+                Some(priority) => dim(priority.label().into()),
+                None => faint("—"),
+            },
+            Column::Session => dim(p.session_id.to_string()),
+            Column::ParentPid if p.parent_pid == 0 => faint("—"),
+            Column::ParentPid => dim(p.parent_pid.to_string()),
             Column::Architecture => match f.architecture {
-                Some(a) => (a.to_owned(), theme::TEXT_DIM),
+                Some(a) => dim(a.to_owned()),
+                None => faint("—"),
+            },
+            Column::Elevated => match f.elevated {
+                Some(true) => ("Yes".into(), theme::TEXT),
+                Some(false) => dim("No".into()),
+                None => faint("—"),
+            },
+            Column::Virtualization => match f.virtualization {
+                Some(crate::sensors::Virtualization::Enabled) => ("Enabled".into(), theme::TEXT),
+                Some(crate::sensors::Virtualization::Disabled) => dim("Disabled".into()),
+                Some(crate::sensors::Virtualization::NotAllowed) => dim("Not allowed".into()),
                 None => faint("—"),
             },
             Column::Description => match &f.description {
-                Some(d) => (d.clone(), theme::TEXT_DIM),
+                Some(d) => dim(d.clone()),
+                None => faint(""),
+            },
+            Column::CommandLine => match &f.command_line {
+                Some(c) => dim(c.clone()),
                 None => faint(""),
             },
         };
-        let galley = widgets::elided(&painter, &text, theme::regular(12.5), color, width);
-        let (anchor, align) = cell_anchor(cell, column);
-        let pos = align.anchor_size(anchor, galley.size()).min;
-        painter.galley(pos, galley, color);
+        table::text(&painter, cell, column, &text, color);
     }
 }
 
-/// Whether the pointer is over the expand chevron at the start of a group row.
-fn chevron_hit(ui: &Ui, rect: Rect) -> bool {
-    ui.ctx().pointer_interact_pos().is_some_and(|p| p.x < rect.left() + PAD + 22.0)
+/// `1234567` → `1,234,567`.
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
-fn chevron(painter: &egui::Painter, center: egui::Pos2, open: bool) {
-    let angle = if open { std::f32::consts::FRAC_PI_2 } else { 0.0 };
-    let rot = egui::emath::Rot2::from_angle(angle);
-    let arm = |v: egui::Vec2| center + rot * v;
-    painter.line(
-        vec![arm(vec2(-2.5, -4.5)), arm(vec2(2.0, 0.0)), arm(vec2(-2.5, 4.5))],
-        Stroke::new(1.5, theme::TEXT_DIM),
-    );
+/// 100 ns units as `h:mm:ss`, like Task Manager.
+fn cpu_time(units: i64) -> String {
+    let s = units / 10_000_000;
+    format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+}
+
+fn context_menu(
+    ui: &mut Ui,
+    settings: &Settings,
+    state: &mut State,
+    rows: &[&ProcessRow],
+    all: &[ProcessRow],
+    nav: &mut Option<Page>,
+) {
+    let single = (rows.len() == 1).then(|| rows[0]);
+    let mut close = false;
+
+    if let Some(window) = rows.iter().find_map(|r| r.window.as_ref())
+        && ui.button("Switch to").clicked()
+    {
+        switch_to(ui, settings, window.hwnd);
+        close = true;
+    }
+    if ui.button("End task").clicked() {
+        request_end(state, rows, false, all);
+        close = true;
+    }
+    if single.is_some() && ui.button("End process tree").clicked() {
+        request_end(state, rows, true, all);
+        close = true;
+    }
+    let suspended = rows.iter().all(|r| r.process.suspended);
+    let (label, action) = if suspended { ("Resume", Action::Resume) } else { ("Suspend", Action::Suspend) };
+    if ui.button(label).clicked() {
+        request(state, action, rows);
+        close = true;
+    }
+    let efficient = rows.iter().all(|r| r.efficiency);
+    if ui.button(if efficient { "✓ Efficiency mode" } else { "Efficiency mode" }).clicked() {
+        request(state, Action::Efficiency(!efficient), rows);
+        close = true;
+    }
+    ui.menu_button("Set priority", |ui| {
+        let current = single.and_then(|r| Priority::from_base(r.process.priority));
+        for priority in Priority::ALL {
+            let label =
+                if current == Some(priority) { format!("✓ {}", priority.label()) } else { priority.label().into() };
+            if ui.button(label).clicked() {
+                request(state, Action::Priority(priority), rows);
+                ui.close();
+            }
+        }
+    });
+    if let Some(row) = single
+        && ui.button("Set affinity…").clicked()
+    {
+        match tasks::affinity(target(row)) {
+            Some((mask, available)) => {
+                state.affinity =
+                    Some(AffinityEdit { target: target(row), label: row.process.name.clone(), mask, available })
+            }
+            None => state.notice = Some(Notice::denied(format!("Access denied: could not read {}.", row.process.name))),
+        }
+        close = true;
+    }
+    ui.separator();
+    if let Some(row) = single {
+        if ui.button("Create dump file").clicked() && state.dump.is_none() {
+            let (t, name) = (target(row), row.process.name.clone());
+            let job = Job::start(ui.ctx(), move || tasks::dump(t, &name));
+            state.notice = Some(Notice::info(format!("Writing a dump file of {}…", row.process.name)));
+            state.dump = Some((row.process.name.clone(), job));
+            close = true;
+        }
+        let pid = row.process.pid;
+        if state.menu_services.as_ref().is_none_or(|(p, _)| *p != pid) {
+            state.menu_services = Some((pid, crate::services::for_pid(pid)));
+        }
+        if let Some((_, services)) = &state.menu_services
+            && !services.is_empty()
+        {
+            let label = if services.len() == 1 {
+                "Go to service".to_owned()
+            } else {
+                format!("Go to services ({})", services.len())
+            };
+            if ui.button(label).clicked() {
+                *nav = Some(Page::ServicesOf(pid));
+                close = true;
+            }
+        }
+    }
+    let path = rows[0].facts.path.clone();
+    if let Some(path) = &path {
+        if ui.button("Open file location").clicked() {
+            shell::open_location(path);
+            close = true;
+        }
+        if ui.button("Properties").clicked() {
+            shell::properties(path);
+            close = true;
+        }
+    }
+    if ui.button("Search online").clicked() {
+        let name = &rows[0].process.name;
+        let query = match &rows[0].facts.description {
+            Some(d) if !d.eq_ignore_ascii_case(name) => format!("{name} {d}"),
+            _ => name.clone(),
+        };
+        shell::search_online(&query);
+        close = true;
+    }
+    ui.separator();
+    if ui.button("Copy name").clicked() {
+        ui.ctx().copy_text(rows[0].process.name.clone());
+        close = true;
+    }
+    if let Some(path) = path
+        && ui.button("Copy path").clicked()
+    {
+        ui.ctx().copy_text(path);
+        close = true;
+    }
+    if let Some(command) = single.and_then(|r| r.facts.command_line.clone())
+        && ui.button("Copy command line").clicked()
+    {
+        ui.ctx().copy_text(command);
+        close = true;
+    }
+    if close {
+        ui.close();
+    }
+}
+
+fn switch_to(ui: &Ui, settings: &Settings, hwnd: isize) {
+    if shell::switch_to(hwnd) && settings.minimize_on_use {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Actions
 
-/// Ending always asks for confirmation, suspending only for processes Windows cannot
-/// do without; resuming runs right away.
+/// Ending always asks for confirmation. With `tree`, everything the process started
+/// (recursively) goes too, children first.
+fn request_end(state: &mut State, rows: &[&ProcessRow], tree: bool, all: &[ProcessRow]) {
+    let mut targets: Vec<Target> = rows.iter().map(|r| target(r)).collect();
+    if tree {
+        let mut descendants = Vec::new();
+        let mut frontier: Vec<&ProcessRow> = rows.to_vec();
+        while let Some(parent) = frontier.pop() {
+            // A child started after its parent; an older process with a matching
+            // parent id belonged to an earlier process with the reused id.
+            for child in all.iter().filter(|c| {
+                c.process.parent_pid == parent.process.pid
+                    && c.process.create_time >= parent.process.create_time
+                    && c.process.pid != parent.process.pid
+            }) {
+                if !descendants.iter().any(|d: &&ProcessRow| d.process.pid == child.process.pid) {
+                    descendants.push(child);
+                    frontier.push(child);
+                }
+            }
+        }
+        let mut tree_targets: Vec<Target> = descendants.iter().rev().map(|r| target(r)).collect();
+        tree_targets.append(&mut targets);
+        targets = tree_targets;
+    }
+    let mut label = label(rows);
+    if tree && targets.len() > 1 {
+        label = format!("{label} and {} processes it started", targets.len() - 1);
+    }
+    let critical = critical(rows, false);
+    let kind = if tree { Confirm::EndTree } else { Confirm::End };
+    state.pending = Some(Pending { kind, targets, label, critical });
+}
+
+fn label(rows: &[&ProcessRow]) -> String {
+    let name = rows.first().map(|r| r.process.name.clone()).unwrap_or_default();
+    if rows.len() > 1 { format!("{} processes of {name}", rows.len()) } else { name }
+}
+
+/// Windows' own flag where readable, else well-known names. Suspending the desktop
+/// window manager freezes the screen, hwmon included.
+fn critical(rows: &[&ProcessRow], suspend: bool) -> bool {
+    const KNOWN: [&str; 8] =
+        ["System", "Registry", "smss.exe", "csrss.exe", "wininit.exe", "services.exe", "lsass.exe", "winlogon.exe"];
+    rows.iter().any(|r| match tasks::is_critical(target(r)) {
+        Some(flag) => flag,
+        None => KNOWN.iter().any(|n| r.process.name.eq_ignore_ascii_case(n)),
+    }) || suspend && rows.iter().any(|r| r.process.name.eq_ignore_ascii_case("dwm.exe"))
+}
+
+/// Suspending asks only for processes Windows cannot do without, realtime priority
+/// always (it can starve the whole system); everything else runs right away.
 fn request(state: &mut State, action: Action, rows: &[&ProcessRow]) {
     let mut targets: Vec<Target> = rows.iter().map(|r| target(r)).collect();
-    let name = rows.first().map(|r| r.process.name.clone()).unwrap_or_default();
-    let label = if rows.len() > 1 { format!("{} processes of {name}", rows.len()) } else { name };
+    let label = label(rows);
     if action == Action::Suspend {
         // Nothing could resume hwmon once it is frozen.
         let own = std::process::id();
         if targets.iter().any(|t| t.pid == own) {
-            state.message = Some(("hwmon cannot suspend itself, as nothing could resume it.".into(), false));
+            state.notice = Some(Notice::info("hwmon cannot suspend itself, as nothing could resume it."));
             targets.retain(|t| t.pid != own);
             if targets.is_empty() {
                 return;
             }
         }
+        if critical(rows, true) {
+            state.pending = Some(Pending { kind: Confirm::Suspend, targets, label, critical: true });
+            return;
+        }
     }
-    // Windows' own flag where readable, else well-known names. Suspending the desktop
-    // window manager freezes the screen, hwmon included.
-    const KNOWN: [&str; 8] =
-        ["System", "Registry", "smss.exe", "csrss.exe", "wininit.exe", "services.exe", "lsass.exe", "winlogon.exe"];
-    let critical = rows.iter().any(|r| match tasks::is_critical(target(r)) {
-        Some(flag) => flag,
-        None => KNOWN.iter().any(|n| r.process.name.eq_ignore_ascii_case(n)),
-    }) || action == Action::Suspend
-        && rows.iter().any(|r| r.process.name.eq_ignore_ascii_case("dwm.exe"));
-    match action {
-        Action::End => state.pending = Some(Pending { action, targets, label, critical }),
-        Action::Suspend if critical => state.pending = Some(Pending { action, targets, label, critical }),
-        _ => execute(state, action, &targets, &label),
+    if action == Action::Priority(Priority::Realtime) {
+        state.pending = Some(Pending { kind: Confirm::Realtime, targets, label, critical: false });
+        return;
     }
+    execute(state, action, &targets, &label);
 }
 
 fn execute(state: &mut State, action: Action, targets: &[Target], label: &str) {
@@ -635,54 +1116,106 @@ fn execute(state: &mut State, action: Action, targets: &[Target], label: &str) {
         }
     }
     let verb = match action {
-        Action::End => "end",
-        Action::Suspend => "suspend",
-        Action::Resume => "resume",
+        Action::End => "end".to_owned(),
+        Action::Suspend => "suspend".to_owned(),
+        Action::Resume => "resume".to_owned(),
+        Action::Priority(p) => format!("set the priority of {label} to {}", p.label().to_lowercase()),
+        Action::Efficiency(true) => "put efficiency mode on for".to_owned(),
+        Action::Efficiency(false) => "take efficiency mode off for".to_owned(),
+        Action::Affinity(_) => "change the processors of".to_owned(),
     };
-    state.message = if denied > 0 {
-        let hint = if state.elevated {
+    let what = if matches!(action, Action::Priority(_)) { verb } else { format!("{verb} {label}") };
+    state.notice = if denied > 0 {
+        let hint = if tasks::is_elevated() {
             "It is protected by Windows."
         } else {
             "It runs as administrator, as SYSTEM or as another user."
         };
-        Some((format!("Access denied: could not {verb} {label}. {hint}"), !state.elevated))
+        Some(Notice::denied(format!("Access denied: could not {what}. {hint}")))
     } else {
-        other.map(|e| (format!("Could not {verb} {label}: {e}"), false))
+        other.map(|e| Notice::info(format!("Could not {what}: {e}")))
     };
 }
 
 fn confirm(ui: &mut Ui, state: &mut State) {
     let Some(pending) = &state.pending else { return };
-    let mut decision = None;
-    let (title, note, warning, confirm) = match pending.action {
-        Action::Suspend => (
-            "Suspend",
+    let (title, note, warning, button) = match pending.kind {
+        Confirm::Suspend => (
+            format!("Suspend {}?", pending.label),
             "It stops until resumed.",
             "This process is essential to Windows. Suspending it can freeze the whole system, \
              hwmon included, so it may not be possible to resume it.",
             "Suspend anyway",
         ),
-        _ => (
-            "End",
+        Confirm::Realtime => (
+            format!("Run {} at realtime priority?", pending.label),
+            "Without administrator rights Windows gives it high priority instead.",
+            "Realtime priority can take the processor away from everything else, including \
+             mouse and keyboard input, until the process yields.",
+            "Set realtime",
+        ),
+        Confirm::EndTree => (
+            format!("End {}?", pending.label),
+            "Unsaved data in them is lost.",
+            "This is a critical Windows process. Ending it crashes Windows.",
+            "End process tree",
+        ),
+        Confirm::End => (
+            format!("End {}?", pending.label),
             "Unsaved data in it is lost.",
             "This is a critical Windows process. Ending it crashes Windows.",
             "End process",
         ),
     };
-    let modal = egui::Modal::new(egui::Id::NULL.with("confirm_action")).show(ui.ctx(), |ui| {
-        ui.set_width(380.0);
-        ui.label(egui::RichText::new(format!("{title} {}?", pending.label)).font(theme::semibold(16.0)));
+    let warning = (pending.critical || pending.kind == Confirm::Realtime).then_some(warning);
+    let Some(go) = table::confirm(ui, "confirm_action", &title, note, warning, button) else { return };
+    let pending = state.pending.take().expect("checked above");
+    if go {
+        let action = match pending.kind {
+            Confirm::End | Confirm::EndTree => Action::End,
+            Confirm::Suspend => Action::Suspend,
+            Confirm::Realtime => Action::Priority(Priority::Realtime),
+        };
+        execute(state, action, &pending.targets, &pending.label);
+    }
+}
+
+/// A checkbox per logical processor, like Task Manager's "Processor affinity".
+fn affinity_dialog(ui: &mut Ui, state: &mut State) {
+    let Some(edit) = &mut state.affinity else { return };
+    let mut decision = None;
+    let modal = egui::Modal::new(egui::Id::NULL.with("affinity")).show(ui.ctx(), |ui| {
+        ui.set_width(420.0);
+        ui.label(egui::RichText::new(format!("Processors for {}", edit.label)).font(theme::semibold(16.0)));
         ui.add_space(-4.0);
-        ui.label(egui::RichText::new(note).font(theme::regular(12.5)).color(theme::TEXT_DIM));
-        if pending.critical {
-            ui.label(egui::RichText::new(warning).font(theme::semibold(12.5)).color(theme::ERROR));
+        ui.label(
+            egui::RichText::new("It only runs on the checked logical processors.")
+                .font(theme::regular(12.5))
+                .color(theme::TEXT_DIM),
+        );
+        let all = edit.mask & edit.available == edit.available;
+        let mut everything = all;
+        if ui.checkbox(&mut everything, "All processors").changed() {
+            edit.mask = if everything { edit.available } else { 0 };
         }
+        let cpus: Vec<u32> = (0..64).filter(|i| edit.available & (1 << i) != 0).collect();
+        egui::Grid::new("affinity_grid").num_columns(4).spacing([16.0, 6.0]).show(ui, |ui| {
+            for (n, cpu) in cpus.iter().enumerate() {
+                let mut on = edit.mask & (1 << cpu) != 0;
+                if ui.checkbox(&mut on, format!("CPU {cpu}")).changed() {
+                    edit.mask ^= 1 << cpu;
+                }
+                if n % 4 == 3 {
+                    ui.end_row();
+                }
+            }
+        });
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if button(ui, confirm, true, true).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                if table::button(ui, "Apply", edit.mask != 0, false).clicked() {
                     decision = Some(true);
                 }
-                if button(ui, "Cancel", true, false).clicked() {
+                if table::button(ui, "Cancel", true, false).clicked() {
                     decision = Some(false);
                 }
             });
@@ -692,9 +1225,67 @@ fn confirm(ui: &mut Ui, state: &mut State) {
         decision = Some(false);
     }
     if let Some(go) = decision {
-        let pending = state.pending.take().expect("checked above");
+        let edit = state.affinity.take().expect("checked above");
         if go {
-            execute(state, pending.action, &pending.targets, &pending.label);
+            execute(state, Action::Affinity(edit.mask), &[edit.target], &edit.label);
         }
+    }
+}
+
+/// Task Manager's "Create new task": a program, document, folder or URL.
+fn run_dialog(ui: &mut Ui, state: &mut State) {
+    let Some(run) = &mut state.run else { return };
+    let mut decision = None;
+    let elevated = tasks::is_elevated();
+    let modal = egui::Modal::new(egui::Id::NULL.with("run_task")).show(ui.ctx(), |ui| {
+        ui.set_width(420.0);
+        ui.label(egui::RichText::new("Run new task").font(theme::semibold(16.0)));
+        ui.add_space(-4.0);
+        ui.label(
+            egui::RichText::new("The name of a program, folder, document or website, as in the Run dialog.")
+                .font(theme::regular(12.5))
+                .color(theme::TEXT_DIM),
+        );
+        let field = table::search(ui, &mut run.command, "e.g. notepad, cmd, %TEMP% or a web address", 400.0);
+        if run.focus {
+            field.request_focus();
+            run.focus = false;
+        }
+        if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+            decision = Some(true);
+        }
+        if elevated {
+            ui.label(
+                egui::RichText::new("It runs as administrator, like hwmon.")
+                    .font(theme::regular(12.5))
+                    .color(theme::LIVE),
+            );
+        } else {
+            ui.checkbox(&mut run.admin, "Create this task with administrative privileges");
+        }
+        if let Some(error) = &run.error {
+            ui.label(egui::RichText::new(error).font(theme::regular(12.5)).color(theme::ERROR));
+        }
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if table::button(ui, "Run", !run.command.trim().is_empty(), false).clicked() {
+                    decision = Some(true);
+                }
+                if table::button(ui, "Cancel", true, false).clicked() {
+                    decision = Some(false);
+                }
+            });
+        });
+    });
+    if modal.should_close() && decision.is_none() {
+        decision = Some(false);
+    }
+    match decision {
+        Some(true) => match shell::run(&run.command, run.admin && !elevated) {
+            Ok(()) => state.run = None,
+            Err(e) => run.error = Some(e),
+        },
+        Some(false) => state.run = None,
+        None => {}
     }
 }

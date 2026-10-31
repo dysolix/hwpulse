@@ -539,8 +539,12 @@ pub fn chart(
     let plot = Rect::from_min_max(pos2(inner.left(), inner.top() + 24.0), pos2(inner.right(), inner.bottom() - footer));
     grid(&painter, plot, if compact { (6, 2) } else { (12, 4) });
     if !compact {
-        let span = HISTORY_LEN as u64 * crate::poller::INTERVAL.as_secs();
-        let span = if span.is_multiple_of(60) { format!("{} minutes", span / 60) } else { format!("{span} seconds") };
+        let span = (HISTORY_LEN as f32 * crate::poller::interval().as_secs_f32()).round() as u64;
+        let span = match span {
+            60 => "1 minute".to_owned(),
+            s if s.is_multiple_of(60) => format!("{} minutes", s / 60),
+            s => format!("{s} seconds"),
+        };
         let y = plot.bottom() + 6.0;
         painter.text(pos2(plot.left(), y), Align2::LEFT_TOP, span, theme::regular(11.0), theme::TEXT_FAINT);
         let low = format_value(lo as f64, first.unit);
@@ -584,8 +588,11 @@ pub fn chart(
         return;
     }
     painter.line_segment([pos2(x, plot.top()), pos2(x, plot.bottom())], Stroke::new(1.0, theme::BORDER_HOVER));
-    let when =
-        if ago == 0 { "now".to_owned() } else { format!("{} s ago", ago as u64 * crate::poller::INTERVAL.as_secs()) };
+    let when = if ago == 0 {
+        "now".to_owned()
+    } else {
+        format!("{} s ago", ago as f32 * crate::poller::interval().as_secs_f32())
+    };
     let when = painter.layout_no_wrap(when, theme::regular(11.0), theme::TEXT_FAINT);
     let text = painter.layout_no_wrap(lines.join("\n"), theme::semibold(12.5), theme::TEXT);
     let size = vec2(text.size().x.max(when.size().x), when.size().y + 2.0 + text.size().y) + vec2(20.0, 14.0);

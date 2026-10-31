@@ -4,11 +4,12 @@ A lightweight hardware monitor for Windows, written in Rust with [egui](https://
 
 - **Dashboard** with live gauges and history charts for GPU, CPU and memory; drives and network adapters can be switched on
 - **Components** page in the style of Task Manager, including a per-thread CPU grid and top processes
-- **Processes** page: every process, sortable, searchable, grouped by app; end, suspend and resume (restart as administrator for elevated and SYSTEM processes)
+- **Processes** page: every process with GPU use and 20+ optional columns, sortable, searchable, grouped by app and into Apps / Background / Windows processes; end (also the whole process tree), suspend, resume, efficiency mode, priority, affinity, dump files, run new task (restart as administrator for elevated and SYSTEM processes)
+- **Services**, **Startup apps** and **Users** pages like Task Manager's: start and stop services, switch startup entries on and off, disconnect or sign out users
 - **GPU** load, temperature, clocks, power, VRAM and NVENC/NVDEC usage (NVIDIA via NVML; AMD and Intel via DirectX)
 - **Drives** identified by serial number, with HDD/SSD and bus type; USB drives come and go live
-- Drag-and-drop layout, saved automatically; optional start with Windows
-- Low overhead: one sample per second, and almost no CPU while in the background
+- Drag-and-drop layout, saved automatically; compact view, always on top, update speed; optional start with Windows
+- Low overhead: one sample per second (adjustable or paused), and almost no CPU while in the background
 
 ## Install
 

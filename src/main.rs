@@ -4,9 +4,13 @@
 mod autostart;
 mod poller;
 mod sensors;
+mod services;
 mod settings;
+mod shell;
+mod startup;
 mod tasks;
 mod ui;
+mod users;
 
 use eframe::egui;
 

@@ -29,6 +29,48 @@ pub struct Settings {
     /// Let charts slide while the window is not focused; otherwise they jump once
     /// per second there, which costs almost nothing.
     pub slide_in_background: bool,
+    /// Keys of the Processes page's shown columns; empty means the default set.
+    pub process_columns: Vec<String>,
+    pub always_on_top: bool,
+    /// Minimize hwmon after "Switch to" brings another app to the front.
+    pub minimize_on_use: bool,
+    pub speed: Speed,
+    /// The small window with just the dashboard's values.
+    pub compact: bool,
+}
+
+/// How often sensors are read, as Task Manager's "Update speed".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Speed {
+    High,
+    #[default]
+    Normal,
+    Low,
+    Paused,
+}
+
+impl Speed {
+    pub const ALL: [Speed; 4] = [Speed::High, Speed::Normal, Speed::Low, Speed::Paused];
+
+    /// `None` while paused.
+    pub fn interval(self) -> Option<std::time::Duration> {
+        let ms = match self {
+            Speed::High => 500,
+            Speed::Normal => 1000,
+            Speed::Low => 4000,
+            Speed::Paused => return None,
+        };
+        Some(std::time::Duration::from_millis(ms))
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Speed::High => "High · 0.5 s",
+            Speed::Normal => "Normal · 1 s",
+            Speed::Low => "Low · 4 s",
+            Speed::Paused => "Paused",
+        }
+    }
 }
 
 impl Settings {

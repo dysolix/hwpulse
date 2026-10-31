@@ -14,7 +14,7 @@ use windows::core::HSTRING;
 
 use super::netinfo::{Adapter, Wifi};
 use super::pdh::{Counter, Query};
-use super::processes::{Details, Process, Row, Sampler, Snapshot};
+use super::processes::{Details, GpuUse, Process, Row, Sampler, Snapshot};
 use super::{
     Breakdown, BreakdownItem, Group, Info, Kind, Processes, Reading, SensorProvider, Unit, info, order, top_processes,
 };
@@ -32,6 +32,8 @@ pub struct SystemProvider {
     /// The latest sample's processes, for [`SensorProvider::process_table`].
     processes: Vec<Process>,
     details: Details,
+    /// Per-process GPU counters, set up the first time the process table is built.
+    gpu: Option<GpuQuery>,
     battery: Option<super::battery::Battery>,
     wifi: Option<Wifi>,
     /// Adapter addresses, refreshed every few polls (they rarely change).
@@ -141,6 +143,7 @@ impl SystemProvider {
             sampler,
             processes: Vec::new(),
             details: Details::default(),
+            gpu: None,
             battery: super::battery::Battery::detect(),
             wifi: Wifi::open(),
             adapters: Vec::new(),
@@ -650,7 +653,8 @@ impl SensorProvider for SystemProvider {
     }
 
     fn process_table(&mut self) -> Option<Vec<Row>> {
-        Some(self.details.rows(&self.processes))
+        let gpu = self.gpu.get_or_insert_with(GpuQuery::new).sample();
+        Some(self.details.rows(&self.processes, &gpu))
     }
 }
 
@@ -1022,4 +1026,53 @@ fn is_external(d: &Win32DiskDrive) -> bool {
         || media.contains("removable")
         || media.contains("external")
         || pnp.starts_with("USBSTOR\\")
+}
+
+/// GPU load and memory per process. Instances are named like
+/// `pid_1234_luid_0x…_phys_0_eng_3_engtype_3D`; a process's load is its busiest engine,
+/// as in Task Manager.
+struct GpuQuery {
+    query: Option<Query>,
+    engines: Option<Counter>,
+    memory: Option<Counter>,
+    collected: Option<std::time::Instant>,
+    last: HashMap<u32, GpuUse>,
+}
+
+impl GpuQuery {
+    fn new() -> Self {
+        let query = Query::new();
+        let engines = query.as_ref().and_then(|q| q.add(r"\GPU Engine(*)\Utilization Percentage"));
+        let memory = query.as_ref().and_then(|q| q.add(r"\GPU Process Memory(*)\Dedicated Usage"));
+        if let Some(q) = &query {
+            q.collect();
+        }
+        Self { query, engines, memory, collected: Some(std::time::Instant::now()), last: HashMap::new() }
+    }
+
+    /// Fresh values when the last sample is old enough for a meaningful rate, else the
+    /// previous ones (the table is also rebuilt right after a tick).
+    fn sample(&mut self) -> HashMap<u32, GpuUse> {
+        let Some(q) = &self.query else { return HashMap::new() };
+        if self.collected.is_some_and(|t| t.elapsed().as_millis() < 400) {
+            return self.last.clone();
+        }
+        q.collect();
+        self.collected = Some(std::time::Instant::now());
+        let pid = |name: &str| name.strip_prefix("pid_")?.split('_').next()?.parse::<u32>().ok();
+        let mut usage: HashMap<u32, GpuUse> = HashMap::new();
+        for (name, value) in self.engines.map(|c| q.array(c)).unwrap_or_default() {
+            if let Some(pid) = pid(&name) {
+                let entry = usage.entry(pid).or_default();
+                entry.load = entry.load.max(value.clamp(0.0, 100.0));
+            }
+        }
+        for (name, value) in self.memory.map(|c| q.array(c)).unwrap_or_default() {
+            if let Some(pid) = pid(&name) {
+                usage.entry(pid).or_default().memory += value.max(0.0) as u64;
+            }
+        }
+        self.last = usage.clone();
+        usage
+    }
 }
