@@ -285,19 +285,42 @@ fn header(ui: &mut Ui, model: &Model, page: &Page, nav: &mut Option<Page>) {
     let inline = title_width + 32.0 + total + 14.0 <= pill.left() - rect.left();
     let machine_space = if model.machine.is_some() { 28.0 } else { 10.0 };
 
-    let bar = if inline {
-        Rect::from_min_size(egui::pos2(pill.left() - 14.0 - total, rect.center().y - 15.0), vec2(total, 30.0))
-    } else {
+    // Tabs per bar: all in one, or wrapped into as many bars as the width needs.
+    let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
+    let mut row_width = 6.0;
+    for (i, w) in widths.iter().enumerate() {
+        let last = rows.last_mut().expect("one row");
+        if !inline && !last.is_empty() && row_width + w > rect.width() {
+            rows.push(Vec::new());
+            row_width = 6.0;
+        }
+        rows.last_mut().expect("one row").push(i);
+        row_width += w;
+    }
+    if !inline {
         ui.add_space(machine_space - 2.0);
-        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
-        Rect::from_min_size(row.min, vec2(total, 30.0))
-    };
-    p.rect_filled(bar, CornerRadius::same(15), theme::SURFACE);
+    }
+    let mut tab_rects = vec![Rect::NOTHING; tabs.len()];
+    for (r, row) in rows.iter().enumerate() {
+        let width: f32 = row.iter().map(|&i| widths[i]).sum::<f32>() + 6.0;
+        let bar = if inline {
+            Rect::from_min_size(egui::pos2(pill.left() - 14.0 - total, rect.center().y - 15.0), vec2(total, 30.0))
+        } else {
+            if r > 0 {
+                ui.add_space(-6.0);
+            }
+            let (line, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+            Rect::from_min_size(line.min, vec2(width, 30.0))
+        };
+        p.rect_filled(bar, CornerRadius::same(15), theme::SURFACE);
+        let mut x = bar.left() + 3.0;
+        for &i in row {
+            tab_rects[i] = Rect::from_min_size(egui::pos2(x, bar.top() + 3.0), vec2(widths[i], 24.0));
+            x += widths[i];
+        }
+    }
 
-    let mut x = bar.left() + 3.0;
-    for ((title, target), w) in tabs.into_iter().zip(widths) {
-        let tab = Rect::from_min_size(egui::pos2(x, bar.top() + 3.0), vec2(w, 24.0));
-        x += w;
+    for ((title, target), tab) in tabs.into_iter().zip(tab_rects) {
         let response =
             ui.interact(tab, ui.scope_id().with(title), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
         let active = &target == page;
