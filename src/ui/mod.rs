@@ -139,7 +139,9 @@ impl eframe::App for App {
         }
 
         CentralPanel::default().frame(Frame::new().fill(theme::BG).inner_margin(Margin::same(22))).show(ui, |ui| {
-            header(ui, &model, page, &mut nav);
+            let links =
+                (*page == Page::Dashboard && !*customizing).then_some((&mut *customizing, &mut settings.compact));
+            header(ui, &model, page, &mut nav, links);
             // These pages work without sensor data; the others wait for the first samples.
             let independent = matches!(page, Page::Settings | Page::Services | Page::Startup | Page::Users);
             if model.groups.is_empty() && model.errors.is_empty() && !independent {
@@ -165,7 +167,7 @@ impl eframe::App for App {
                     Page::Dashboard if *customizing => customize_dashboard(ui, &model, settings, customizing),
                     Page::Dashboard => {
                         dashboard(ui, &model, settings, &mut nav, customizing);
-                        footer(ui, settings, customizing, viewport_height - (ui.cursor().top() - content_top));
+                        footer(ui, viewport_height - (ui.cursor().top() - content_top));
                     }
                     Page::Settings => settings_page(ui, &model, settings, autostart),
                     _ => {}
@@ -235,7 +237,8 @@ impl App {
 // ---------------------------------------------------------------------------
 // Header
 
-fn header(ui: &mut Ui, model: &Model, page: &Page, nav: &mut Option<Page>) {
+/// `links` (customizing, compact view) adds the Dashboard's options under the tabs.
+fn header(ui: &mut Ui, model: &Model, page: &Page, nav: &mut Option<Page>, links: Option<(&mut bool, &mut bool)>) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::hover());
     let p = ui.painter().clone();
     let title = p.layout_no_wrap("Hardware Monitor".to_owned(), theme::semibold(22.0), theme::TEXT);
@@ -307,6 +310,24 @@ fn header(ui: &mut Ui, model: &Model, page: &Page, nav: &mut Option<Page>) {
         p.text(tab.center(), Align2::CENTER_CENTER, title, font.clone(), color);
         if response.clicked() && page != &target {
             *nav = Some(target);
+        }
+    }
+
+    // Dashboard only: its options on the mainboard line, right-aligned.
+    if let Some((customizing, compact)) = links {
+        let mut right = rect.right();
+        let y = rect.bottom() + 12.0;
+        for (label, flag) in [("Compact view", compact), ("Customize", customizing)] {
+            let galley = p.layout_no_wrap(label.to_owned(), theme::regular(12.5), theme::TEXT_DIM);
+            let area = Align2::RIGHT_CENTER.anchor_size(egui::pos2(right, y), galley.size());
+            right = area.left() - 18.0;
+            let response =
+                ui.interact(area, ui.scope_id().with(label), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+            let color = if response.hovered() { theme::ACCENT } else { theme::TEXT_DIM };
+            p.galley_with_override_text_color(area.min, galley, color);
+            if response.clicked() {
+                *flag = true;
+            }
         }
     }
 
@@ -591,8 +612,11 @@ fn group_section(ui: &mut Ui, group: &Group, model: &Model, nav: &mut Option<Pag
     }
     let title = p.layout_no_wrap(format!("{}  ›", group.title), theme::semibold(16.0), theme::TEXT);
     let title_rect = Rect::from_min_size(rect.left_top() + vec2(0.0, 4.0), title.size());
-    let response =
-        ui.interact(title_rect, drag_id.with("title"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+    // Also senses drags, so a drag that starts on the title goes nowhere instead of
+    // moving the section: the title is a link, the rest of the header the handle.
+    let response = ui
+        .interact(title_rect, drag_id.with("title"), Sense::click_and_drag())
+        .on_hover_cursor(CursorIcon::PointingHand);
     let color = if response.hovered() { theme::ACCENT } else { theme::TEXT };
     p.galley_with_override_text_color(title_rect.min, title, color);
     p.text(
@@ -1172,7 +1196,7 @@ fn link(ui: &mut Ui, text: &str, font: egui::FontId, color: egui::Color32, chevr
 
 /// Sits right below the content, or at the bottom of the window when the content
 /// is shorter than the window. `remaining` is the unused viewport height.
-fn footer(ui: &mut Ui, settings: &mut Settings, customizing: &mut bool, remaining: f32) {
+fn footer(ui: &mut Ui, remaining: f32) {
     const HEIGHT: f32 = 22.0;
     ui.add_space((remaining - HEIGHT).max(2.0));
     let interval = poller::interval().as_secs_f32();
@@ -1184,17 +1208,6 @@ fn footer(ui: &mut Ui, settings: &mut Settings, customizing: &mut bool, remainin
         format!("Polling every {interval} s · {history} history")
     };
     ui.vertical_centered(|ui| {
-        ui.horizontal(|ui| {
-            let link_width = 180.0;
-            let galley = ui.painter().layout_no_wrap(text.clone(), theme::regular(11.5), theme::TEXT_FAINT);
-            ui.add_space(((ui.available_width() - galley.size().x - link_width) / 2.0).max(0.0));
-            ui.label(egui::RichText::new(text).font(theme::regular(11.5)).color(theme::TEXT_FAINT));
-            if link(ui, "Customize", theme::regular(11.5), theme::TEXT_DIM, false).clicked() {
-                *customizing = true;
-            }
-            if link(ui, "Compact view", theme::regular(11.5), theme::TEXT_DIM, false).clicked() {
-                settings.compact = true;
-            }
-        });
+        ui.label(egui::RichText::new(text).font(theme::regular(11.5)).color(theme::TEXT_FAINT));
     });
 }
