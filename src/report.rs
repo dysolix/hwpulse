@@ -71,7 +71,10 @@ impl Report {
                     .iter()
                     // Volumes show free space, which changes.
                     .filter(|f| !LEFT_OUT.contains(&f.label.as_str()) && !f.label.starts_with("Volume "))
-                    .map(|f| (f.label.clone(), f.value.clone()))
+                    .map(|f| match f.label.as_str() {
+                        "PCIe link" => (f.label.clone(), pcie_link(&f.value)),
+                        _ => (f.label.clone(), f.value.clone()),
+                    })
                     .collect(),
             })
             .collect();
@@ -142,6 +145,21 @@ impl Report {
         }
         out += if self.components.is_empty() { "]\n}\n" } else { "\n  ]\n}\n" };
         out
+    }
+}
+
+/// `Gen 1 × 8 (max Gen 4 × 16)` → `× 8 lanes (card: Gen 4 × 16)`. The generation drops
+/// while the GPU idles, so a copy would differ from one moment to the next; the lane
+/// count stays and shows a card running on fewer lanes than it supports.
+fn pcie_link(value: &str) -> String {
+    let lanes = |s: &str| s.split('×').nth(1).map(|w| w.trim().to_owned());
+    let (now, max) = match value.split_once(" (max ") {
+        Some((now, max)) => (now, max.trim_end_matches(')')),
+        None => (value, value),
+    };
+    match lanes(now) {
+        Some(width) => format!("× {width} lanes (card: {max})"),
+        None => value.to_owned(),
     }
 }
 
@@ -231,6 +249,13 @@ mod tests {
         // Balanced brackets and no trailing commas.
         assert_eq!(json.matches('{').count(), json.matches('}').count());
         assert!(!json.contains(",\n  ]") && !json.contains(",\n      }"));
+    }
+
+    #[test]
+    fn pcie_link_leaves_out_the_idle_generation() {
+        assert_eq!(pcie_link("Gen 1 × 8 (max Gen 4 × 16)"), "× 8 lanes (card: Gen 4 × 16)");
+        assert_eq!(pcie_link("Gen 4 × 8 (max Gen 4 × 16)"), "× 8 lanes (card: Gen 4 × 16)");
+        assert_eq!(pcie_link("Gen 4 × 16"), "× 16 lanes (card: Gen 4 × 16)");
     }
 
     #[test]
