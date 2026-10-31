@@ -34,7 +34,8 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, model: Shared) -> Self {
+        model.attach(&cc.egui_ctx);
         theme::apply(&cc.egui_ctx);
         window::style_title_bar(cc);
         let settings = cc.storage.and_then(|s| eframe::get_value(s, settings::STORAGE_KEY)).unwrap_or_default();
@@ -46,7 +47,7 @@ impl App {
             _ => Page::Dashboard,
         };
         Self {
-            model: poller::spawn(cc.egui_ctx.clone()),
+            model,
             page,
             settings,
             components: Default::default(),

@@ -214,11 +214,14 @@ pub fn create_providers() -> (Vec<Box<dyn SensorProvider>>, Vec<String>) {
     let mut providers: Vec<Box<dyn SensorProvider>> = Vec::new();
     let mut errors = Vec::new();
 
+    // Loading NVML (~30 ms) overlaps with the system provider's setup.
+    let nvml = std::thread::spawn(nvml::NvmlProvider::new);
     match system::SystemProvider::new() {
         Ok(p) => providers.push(Box::new(p)),
         Err(e) => errors.push(format!("System: {e}")),
     }
-    let has_nvml = match nvml::NvmlProvider::new() {
+    let nvml = nvml.join().unwrap_or_else(|_| Err("failed to load".into()));
+    let has_nvml = match nvml {
         Ok(Some(p)) => {
             providers.push(Box::new(p));
             true

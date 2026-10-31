@@ -11,6 +11,7 @@ mod ui;
 use eframe::egui;
 
 fn main() -> eframe::Result {
+    let model = poller::spawn();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Hardware Monitor")
@@ -19,5 +20,5 @@ fn main() -> eframe::Result {
             .with_icon(std::sync::Arc::new(ui::window::app_icon())),
         ..Default::default()
     };
-    eframe::run_native("hwmon", options, Box::new(|cc| Ok(Box::new(ui::App::new(cc)))))
+    eframe::run_native("hwmon", options, Box::new(|cc| Ok(Box::new(ui::App::new(cc, model)))))
 }

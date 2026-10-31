@@ -2,7 +2,7 @@
 //! Between ticks nothing runs: the thread sleeps and egui only repaints on request.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -31,16 +31,22 @@ pub struct Model {
     pub processes: Option<Vec<ProcessRow>>,
 }
 
-/// The model plus a way to wake the poller between ticks.
+/// The model plus a way to wake the poller between ticks, and the UI on new samples.
 #[derive(Clone, Default)]
 pub struct Shared {
     model: Arc<Mutex<Model>>,
     wake: Arc<Condvar>,
+    ui: Arc<OnceLock<egui::Context>>,
 }
 
 impl Shared {
     pub fn lock(&self) -> MutexGuard<'_, Model> {
         self.model.lock().unwrap()
+    }
+
+    /// Lets new samples repaint the window; until then they wait for its first frame.
+    pub fn attach(&self, ctx: &egui::Context) {
+        let _ = self.ui.set(ctx.clone());
     }
 
     /// Builds the process list right away instead of at the next tick; call after
@@ -50,9 +56,16 @@ impl Shared {
     }
 }
 
-pub fn spawn(ctx: egui::Context) -> Shared {
+/// Starts before the window exists, so the slow sensor setup (PDH alone takes ~0.3 s)
+/// overlaps with creating it.
+pub fn spawn() -> Shared {
     let shared = Shared::default();
-    let (model, wake) = (shared.model.clone(), shared.wake.clone());
+    let (model, wake, ui) = (shared.model.clone(), shared.wake.clone(), shared.ui.clone());
+    let repaint = move || {
+        if let Some(ctx) = ui.get() {
+            ctx.request_repaint();
+        }
+    };
 
     thread::Builder::new()
         .name("sensor-poller".into())
@@ -94,7 +107,7 @@ pub fn spawn(ctx: egui::Context) -> Shared {
                     m.groups = groups;
                     m.updated = Some(Instant::now());
                 }
-                ctx.request_repaint();
+                repaint();
 
                 // Sleep until the next tick. When the Processes page opens meanwhile,
                 // build its list from the latest sample right away.
@@ -111,7 +124,7 @@ pub fn spawn(ctx: egui::Context) -> Shared {
                     let table = process_table(&mut providers);
                     m = model.lock().unwrap();
                     m.processes = Some(table);
-                    ctx.request_repaint();
+                    repaint();
                 }
             }
         })

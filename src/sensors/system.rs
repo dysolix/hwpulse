@@ -83,6 +83,8 @@ struct Net {
 
 impl SystemProvider {
     pub fn new() -> Result<Self, String> {
+        // WMI takes ~50 ms; ask it while PDH sets up its counters.
+        let inventory = std::thread::spawn(Inventory::load);
         let query = Query::new().ok_or("could not open PDH query")?;
         let cpu = Cpu {
             utility: query.add(r"\Processor Information(_Total)\% Processor Utility"),
@@ -124,7 +126,7 @@ impl SystemProvider {
         };
         // Prime rate counters so the first real poll has a baseline.
         query.collect();
-        let inventory = Inventory::load();
+        let inventory = inventory.join().unwrap_or_default();
         let mut sampler = Sampler::new(inventory.logical_processors);
         sampler.sample();
 
