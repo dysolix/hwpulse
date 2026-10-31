@@ -81,11 +81,12 @@ impl Report {
         Self { mainboard: mainboard.map(str::to_owned), windows: windows_version(), components }
     }
 
-    pub fn format(&self, format: Format) -> String {
+    /// `detailed` lists every component's facts; otherwise just its type and name.
+    pub fn format(&self, format: Format, detailed: bool) -> String {
         match format {
-            Format::Text => self.text(),
-            Format::Markdown => self.markdown(),
-            Format::Json => self.json(),
+            Format::Text => self.text(detailed),
+            Format::Markdown => self.markdown(detailed),
+            Format::Json => self.json(detailed),
         }
     }
 
@@ -96,12 +97,19 @@ impl Report {
             .collect()
     }
 
-    fn text(&self) -> String {
+    fn text(&self, detailed: bool) -> String {
         let mut out = String::new();
         for (label, value) in self.system() {
             out += &format!("{label}: {value}\n");
         }
+        if !detailed {
+            out += "\n";
+        }
         for c in &self.components {
+            if !detailed {
+                out += &format!("{}: {}\n", c.kind, c.name);
+                continue;
+            }
             out += &format!("\n{}: {}\n", c.kind, c.name);
             for (label, value) in &c.facts {
                 out += &format!("  {label}: {value}\n");
@@ -110,12 +118,16 @@ impl Report {
         out
     }
 
-    fn markdown(&self) -> String {
+    fn markdown(&self, detailed: bool) -> String {
         let mut out = String::from("## Hardware\n\n");
         for (label, value) in self.system() {
             out += &format!("- **{label}:** {value}\n");
         }
         for c in &self.components {
+            if !detailed {
+                out += &format!("- **{}:** {}\n", c.kind, c.name);
+                continue;
+            }
             out += &format!("\n### {}: {}\n\n", c.kind, c.name);
             for (label, value) in &c.facts {
                 out += &format!("- **{label}:** {value}\n");
@@ -124,7 +136,7 @@ impl Report {
         out
     }
 
-    fn json(&self) -> String {
+    fn json(&self, detailed: bool) -> String {
         let mut out = String::from("{\n");
         for (label, value) in self.system() {
             out += &format!("  {}: {},\n", string(&label.to_lowercase()), string(value));
@@ -132,6 +144,10 @@ impl Report {
         out += "  \"components\": [";
         for (i, c) in self.components.iter().enumerate() {
             out += if i == 0 { "\n" } else { ",\n" };
+            if !detailed {
+                out += &format!("    {{ \"type\": {}, \"name\": {} }}", string(c.kind), string(&c.name));
+                continue;
+            }
             out += &format!(
                 "    {{\n      \"type\": {},\n      \"name\": {},\n      \"details\": {{",
                 string(c.kind),
@@ -236,19 +252,31 @@ mod tests {
     #[test]
     fn text_and_markdown_list_every_fact() {
         let r = sample();
-        assert!(r.text().contains("Processor: Ryzen \"X3D\"\n  Cores: 8\n"));
-        assert!(r.markdown().contains("### Processor: Ryzen \"X3D\"\n\n- **Cores:** 8\n"));
+        assert!(r.text(true).contains("Processor: Ryzen \"X3D\"\n  Cores: 8\n"));
+        assert!(r.markdown(true).contains("### Processor: Ryzen \"X3D\"\n\n- **Cores:** 8\n"));
     }
 
     #[test]
     fn json_is_escaped_and_well_formed() {
-        let json = sample().json();
+        let json = sample().json(true);
         assert!(json.contains(r#""name": "Ryzen \"X3D\"""#));
         assert!(json.contains(r#""Path": "C:\\x""#));
         assert!(json.contains(r#""details": {}"#));
         // Balanced brackets and no trailing commas.
         assert_eq!(json.matches('{').count(), json.matches('}').count());
         assert!(!json.contains(",\n  ]") && !json.contains(",\n      }"));
+    }
+
+    #[test]
+    fn names_only_lists_one_line_per_component() {
+        let r = sample();
+        assert_eq!(
+            r.text(false),
+            "Mainboard: ASUS B650\nWindows: Windows 11 Home\n\nProcessor: Ryzen \"X3D\"\nBattery: Battery\n"
+        );
+        assert!(r.markdown(false).ends_with("- **Processor:** Ryzen \"X3D\"\n- **Battery:** Battery\n"));
+        let json = r.json(false);
+        assert!(json.contains(r#"{ "type": "Processor", "name": "Ryzen \"X3D\"" },"#) && !json.contains("details"));
     }
 
     #[test]
