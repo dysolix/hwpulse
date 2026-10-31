@@ -139,9 +139,8 @@ impl eframe::App for App {
         }
 
         CentralPanel::default().frame(Frame::new().fill(theme::BG).inner_margin(Margin::same(22))).show(ui, |ui| {
-            let links =
-                (*page == Page::Dashboard && !*customizing).then_some((&mut *customizing, &mut settings.compact));
-            header(ui, &model, page, &mut nav, links);
+            header(ui, &model, page, &mut nav);
+            title(ui, &model, page, settings, customizing);
             // These pages work without sensor data; the others wait for the first samples.
             let independent = matches!(page, Page::Settings | Page::Services | Page::Startup | Page::Users);
             if model.groups.is_empty() && model.errors.is_empty() && !independent {
@@ -237,8 +236,7 @@ impl App {
 // ---------------------------------------------------------------------------
 // Header
 
-/// `links` (customizing, compact view) adds the Dashboard's options under the tabs.
-fn header(ui: &mut Ui, model: &Model, page: &Page, nav: &mut Option<Page>, links: Option<(&mut bool, &mut bool)>) {
+fn header(ui: &mut Ui, model: &Model, page: &Page, nav: &mut Option<Page>) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::hover());
     let p = ui.painter().clone();
     let title = p.layout_no_wrap("Hardware Monitor".to_owned(), theme::semibold(22.0), theme::TEXT);
@@ -313,25 +311,48 @@ fn header(ui: &mut Ui, model: &Model, page: &Page, nav: &mut Option<Page>, links
         }
     }
 
-    // Dashboard only: its options on the mainboard line, right-aligned.
-    if let Some((customizing, compact)) = links {
-        let mut right = rect.right();
-        let y = rect.bottom() + 12.0;
-        for (label, flag) in [("Compact view", compact), ("Customize", customizing)] {
-            let galley = p.layout_no_wrap(label.to_owned(), theme::regular(12.5), theme::TEXT_DIM);
-            let area = Align2::RIGHT_CENTER.anchor_size(egui::pos2(right, y), galley.size());
-            right = area.left() - 18.0;
-            let response =
-                ui.interact(area, ui.scope_id().with(label), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
-            let color = if response.hovered() { theme::ACCENT } else { theme::TEXT_DIM };
-            p.galley_with_override_text_color(area.min, galley, color);
-            if response.clicked() {
-                *flag = true;
-            }
-        }
-    }
-
     ui.add_space(if inline { machine_space } else { 6.0 });
+}
+
+/// The page's name, with the Dashboard's buttons on the right.
+fn title(ui: &mut Ui, model: &Model, page: &Page, settings: &mut Settings, customizing: &mut bool) {
+    let name = match page {
+        Page::Dashboard if *customizing => "Customize dashboard",
+        Page::Dashboard => "Dashboard",
+        Page::Components | Page::Component(_) => "Components",
+        Page::Processes | Page::Process(_) => "Processes",
+        Page::Services | Page::ServicesOf(_) => "Services",
+        Page::Startup => "Startup apps",
+        Page::Users => "Users",
+        Page::Settings => "Settings",
+    };
+    ui.horizontal(|ui| {
+        ui.set_min_height(30.0);
+        ui.label(egui::RichText::new(name).font(theme::semibold(18.0)).color(theme::TEXT));
+        if *page == Page::Dashboard && *customizing {
+            let shown = model.groups.iter().filter(|g| settings.group_visible(g)).count();
+            let text = format!("{shown} of {} components shown", model.groups.len());
+            ui.label(egui::RichText::new(text).font(theme::regular(12.5)).color(theme::TEXT_FAINT));
+        }
+        if *page != Page::Dashboard {
+            return;
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if *customizing {
+                if table::button(ui, "Done", true, false).clicked() {
+                    *customizing = false;
+                }
+                return;
+            }
+            if table::button(ui, "Compact view", true, false).clicked() {
+                settings.compact = true;
+            }
+            if table::button(ui, "Customize", true, false).clicked() {
+                *customizing = true;
+            }
+        });
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -816,24 +837,9 @@ fn section_heading(ui: &mut Ui, title: &str, description: &str) {
 /// The Dashboard page while customizing: which components and values get cards, in
 /// which order. Done (or Esc) returns to the cards.
 fn customize_dashboard(ui: &mut Ui, model: &Model, settings: &mut Settings, customizing: &mut bool) {
-    let shown = model.groups.iter().filter(|g| settings.group_visible(g)).count();
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            ui.label(egui::RichText::new("Customize dashboard").font(theme::semibold(16.0)).color(theme::TEXT));
-            ui.add_space(-8.0);
-            ui.label(
-                egui::RichText::new(format!("{shown} of {} components shown", model.groups.len()))
-                    .font(theme::regular(12.0))
-                    .color(theme::TEXT_FAINT),
-            );
-        });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if table::button(ui, "Done", true, false).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                *customizing = false;
-            }
-        });
-    });
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        *customizing = false;
+    }
     ui.label(
         egui::RichText::new(
             "Drag the handle to reorder, switch components on or off and pick which values get a card. \
