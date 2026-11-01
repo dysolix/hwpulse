@@ -1,5 +1,5 @@
 //! A summary of the PC's hardware for the clipboard, e.g. for a support request or a
-//! forum post: mainboard, Windows version and every component with its fixed facts,
+//! forum post: mainboard, operating system and every component with its fixed facts,
 //! as plain text, Markdown or JSON. Live values and anything that identifies the
 //! machine or its network (addresses, network name) are left out.
 
@@ -29,7 +29,8 @@ const LEFT_OUT: [&str; 15] = [
 
 pub struct Report {
     pub mainboard: Option<String>,
-    pub windows: Option<String>,
+    /// The operating system, e.g. "Windows 11 Home 25H2 (build 26200)".
+    pub os: Option<String>,
     pub components: Vec<Component>,
 }
 
@@ -78,7 +79,7 @@ impl Report {
                     .collect(),
             })
             .collect();
-        Self { mainboard: mainboard.map(str::to_owned), windows: windows_version(), components }
+        Self { mainboard: mainboard.map(str::to_owned), os: os_version(), components }
     }
 
     /// `detailed` lists every component's facts; otherwise just its type and name.
@@ -91,7 +92,7 @@ impl Report {
     }
 
     fn system(&self) -> Vec<(&str, &str)> {
-        [("Mainboard", &self.mainboard), ("Windows", &self.windows)]
+        [("Mainboard", &self.mainboard), ("OS", &self.os)]
             .into_iter()
             .filter_map(|(label, value)| Some((label, value.as_deref()?)))
             .collect()
@@ -198,8 +199,8 @@ fn string(s: &str) -> String {
     out
 }
 
-/// E.g. "Windows 11 Home 25H2 (build 26200)".
-fn windows_version() -> Option<String> {
+/// E.g. "Windows 11 Home 25H2 (build 26200)". Windows only, like the rest of hwmon.
+fn os_version() -> Option<String> {
     let product = registry("ProductName")?;
     let build: u32 = registry("CurrentBuildNumber").and_then(|b| b.parse().ok()).unwrap_or(0);
     // Windows 11 still calls itself "Windows 10" here; build 22000 was its first.
@@ -237,7 +238,7 @@ mod tests {
     fn sample() -> Report {
         Report {
             mainboard: Some("ASUS B650".into()),
-            windows: Some("Windows 11 Home".into()),
+            os: Some("Windows 11 Home".into()),
             components: vec![
                 Component {
                     kind: "Processor",
@@ -272,7 +273,7 @@ mod tests {
         let r = sample();
         assert_eq!(
             r.text(false),
-            "Mainboard: ASUS B650\nWindows: Windows 11 Home\n\nProcessor: Ryzen \"X3D\"\nBattery: Battery\n"
+            "Mainboard: ASUS B650\nOS: Windows 11 Home\n\nProcessor: Ryzen \"X3D\"\nBattery: Battery\n"
         );
         assert!(r.markdown(false).ends_with("- **Processor:** Ryzen \"X3D\"\n- **Battery:** Battery\n"));
         let json = r.json(false);
@@ -287,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_windows_version() {
-        assert!(windows_version().is_some_and(|v| v.starts_with("Windows")));
+    fn reads_the_os_version() {
+        assert!(os_version().is_some_and(|v| v.starts_with("Windows")));
     }
 }
