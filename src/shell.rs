@@ -14,7 +14,7 @@ use windows::Win32::UI::WindowsAndMessaging::{IsIconic, SW_RESTORE, SW_SHOWNORMA
 use windows::core::{HSTRING, PCWSTR, w};
 
 /// `C:\Windows\System32`, from Windows itself rather than an environment variable
-/// (which the user can change, also for an elevated hwmon).
+/// (which the user can change, also for an elevated hwpulse).
 pub fn system_dir() -> PathBuf {
     let mut buffer = [0u16; 260];
     let len = unsafe { GetSystemDirectoryW(Some(&mut buffer)) } as usize;

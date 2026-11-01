@@ -1,4 +1,4 @@
-# Hardware Monitor
+# HWPulse
 
 A lightweight hardware monitor for Windows, written in Rust with [egui](https://github.com/emilk/egui).
 
@@ -15,10 +15,10 @@ A lightweight hardware monitor for Windows, written in Rust with [egui](https://
 
 Download from [Releases](../../releases):
 
-- `hwmon-setup-<version>.exe` installs for the current user (no admin rights) to `%LOCALAPPDATA%\Programs\hwmon`, or, if you choose "Install for all users", to `Program Files` (admin rights). The all-users install is the safer choice if you use "Restart as administrator", since only admins can replace the exe there. Silent installs take `/CURRENTUSER` or `/ALLUSERS`.
-- `hwmon-<version>-portable.exe` runs from anywhere
+- `hwpulse-setup-<version>.exe` installs for the current user (no admin rights) to `%LOCALAPPDATA%\Programs\hwpulse`, or, if you choose "Install for all users", to `Program Files` (admin rights). The all-users install is the safer choice if you use "Restart as administrator", since only admins can replace the exe there. Silent installs take `/CURRENTUSER` or `/ALLUSERS`.
+- `hwpulse-<version>-portable.exe` runs from anywhere
 
-Requires 64-bit Windows 10 or 11. The most detailed GPU readings need an NVIDIA GPU. Settings are stored in `%APPDATA%\hwmon`.
+Requires 64-bit Windows 10 or 11. The most detailed GPU readings need an NVIDIA GPU. Settings are stored in `%APPDATA%\hwpulse`.
 
 ## Build
 
@@ -30,4 +30,4 @@ cargo run --release
 
 ## Release
 
-Run the **Version** workflow in GitHub Actions and pick the bump. It updates `Cargo.toml`, tags the commit and starts **Release**, which builds both files, signs them with [minisign](https://jedisct1.github.io/minisign/) and publishes them. The public key is `installer/hwmon.pub`.
+Run the **Version** workflow in GitHub Actions and pick the bump. It updates `Cargo.toml`, tags the commit and starts **Release**, which builds both files, signs them with [minisign](https://jedisct1.github.io/minisign/) and publishes them. The public key is `installer/hwpulse.pub`.

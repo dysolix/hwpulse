@@ -73,7 +73,7 @@ fn query(session: u32, class: WTS_INFO_CLASS) -> Option<String> {
     text
 }
 
-/// The session hwmon runs in.
+/// The session hwpulse runs in.
 pub fn current() -> u32 {
     let mut session = 0;
     let _ = unsafe { ProcessIdToSessionId(std::process::id(), &mut session) };

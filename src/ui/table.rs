@@ -194,7 +194,7 @@ pub fn button(ui: &mut Ui, label: &str, enabled: bool, danger: bool) -> Response
     if enabled { response.on_hover_cursor(CursorIcon::PointingHand) } else { response }
 }
 
-/// "Administrator" next to the toolbar buttons while hwmon runs elevated.
+/// "Administrator" next to the toolbar buttons while hwpulse runs elevated.
 pub fn admin_badge(ui: &mut Ui) {
     if tasks::is_elevated() {
         ui.label(egui::RichText::new("Administrator").font(theme::semibold(12.0)).color(theme::LIVE));

@@ -1,4 +1,4 @@
-//! User choices, persisted by eframe (`%APPDATA%\hwmon\data\app.ron`).
+//! User choices, persisted by eframe (`%APPDATA%\hwpulse\data\app.ron`).
 //!
 //! Only deviations from the defaults are stored, so a newly detected component
 //! follows the default for its kind: GPUs, CPU and memory are shown, drives and
@@ -34,7 +34,7 @@ pub struct Settings {
     /// Keys of the Processes page's shown columns; empty means the default set.
     pub process_columns: Vec<String>,
     pub always_on_top: bool,
-    /// Minimize hwmon after "Switch to" brings another app to the front.
+    /// Minimize hwpulse after "Switch to" brings another app to the front.
     pub minimize_on_use: bool,
     pub speed: Speed,
     /// The small window with just the dashboard's values.
@@ -48,7 +48,7 @@ pub struct Settings {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Animation {
     Always,
-    /// Only while hwmon is the active window.
+    /// Only while hwpulse is the active window.
     #[default]
     Foreground,
     Never,

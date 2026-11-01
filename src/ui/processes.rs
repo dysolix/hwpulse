@@ -1069,7 +1069,7 @@ fn label(rows: &[&ProcessRow]) -> String {
 }
 
 /// Windows' own flag where readable, else well-known names. Suspending the desktop
-/// window manager freezes the screen, hwmon included.
+/// window manager freezes the screen, hwpulse included.
 fn critical(rows: &[&ProcessRow], suspend: bool) -> bool {
     const KNOWN: [&str; 8] =
         ["System", "Registry", "smss.exe", "csrss.exe", "wininit.exe", "services.exe", "lsass.exe", "winlogon.exe"];
@@ -1085,10 +1085,10 @@ fn request(state: &mut State, action: Action, rows: &[&ProcessRow]) {
     let mut targets: Vec<Target> = rows.iter().map(|r| target(r)).collect();
     let label = label(rows);
     if action == Action::Suspend {
-        // Nothing could resume hwmon once it is frozen.
+        // Nothing could resume hwpulse once it is frozen.
         let own = std::process::id();
         if targets.iter().any(|t| t.pid == own) {
-            state.notice = Some(Notice::info("hwmon cannot suspend itself, as nothing could resume it."));
+            state.notice = Some(Notice::info("hwpulse cannot suspend itself, as nothing could resume it."));
             targets.retain(|t| t.pid != own);
             if targets.is_empty() {
                 return;
@@ -1145,7 +1145,7 @@ fn confirm(ui: &mut Ui, state: &mut State) {
             format!("Suspend {}?", pending.label),
             "It stops until resumed.",
             "This process is essential to Windows. Suspending it can freeze the whole system, \
-             hwmon included, so it may not be possible to resume it.",
+             hwpulse included, so it may not be possible to resume it.",
             "Suspend anyway",
         ),
         Confirm::Realtime => (
@@ -1257,7 +1257,7 @@ fn run_dialog(ui: &mut Ui, state: &mut State) {
         }
         if elevated {
             ui.label(
-                egui::RichText::new("It runs as administrator, like hwmon.")
+                egui::RichText::new("It runs as administrator, like hwpulse.")
                     .font(theme::regular(12.5))
                     .color(theme::LIVE),
             );

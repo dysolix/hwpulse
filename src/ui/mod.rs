@@ -242,7 +242,7 @@ impl App {
 fn header(ui: &mut Ui, model: &Model, page: &Page, nav: &mut Option<Page>) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::hover());
     let p = ui.painter().clone();
-    let title = p.layout_no_wrap("Hardware Monitor".to_owned(), theme::semibold(22.0), theme::TEXT);
+    let title = p.layout_no_wrap("HWPulse".to_owned(), theme::semibold(22.0), theme::TEXT);
     let title_width = title.size().x;
     p.galley(rect.left_center() - vec2(0.0, title.size().y / 2.0), title, theme::TEXT);
     if let Some(machine) = &model.machine {
@@ -723,7 +723,7 @@ fn settings_page(ui: &mut Ui, model: &Model, settings: &mut Settings, autostart:
 fn about(ui: &mut Ui) {
     ui.label(egui::RichText::new("About").font(theme::semibold(16.0)).color(theme::TEXT));
     ui.add_space(-8.0);
-    let text = format!("Hardware Monitor {}", env!("CARGO_PKG_VERSION"));
+    let text = format!("HWPulse {}", env!("CARGO_PKG_VERSION"));
     ui.label(egui::RichText::new(text).font(theme::regular(13.0)).color(theme::TEXT_DIM));
     ui.add_space(14.0);
 }
@@ -785,7 +785,7 @@ fn speed_settings(ui: &mut Ui, settings: &mut Settings) {
 }
 
 fn window_settings(ui: &mut Ui, settings: &mut Settings) {
-    section_heading(ui, "Window", "How the hwmon window behaves.");
+    section_heading(ui, "Window", "How the hwpulse window behaves.");
     ui.add_space(6.0);
     if switch_card(ui, "Always on top", "Stay above other windows, also in the compact view.", settings.always_on_top) {
         settings.always_on_top = !settings.always_on_top;
@@ -793,7 +793,7 @@ fn window_settings(ui: &mut Ui, settings: &mut Settings) {
     if switch_card(
         ui,
         "Minimize on use",
-        "Minimize hwmon after \u{201c}Switch to\u{201d} brings an app to the front.",
+        "Minimize hwpulse after \u{201c}Switch to\u{201d} brings an app to the front.",
         settings.minimize_on_use,
     ) {
         settings.minimize_on_use = !settings.minimize_on_use;
@@ -836,7 +836,7 @@ fn startup_settings(ui: &mut Ui, autostart: &mut autostart::State) {
         autostart::State::OtherCopy(path) => {
             format!("Another copy starts with Windows ({}). Switch on to start this one instead.", path.display())
         }
-        _ => "Open hwmon when you sign in.".to_owned(),
+        _ => "Open hwpulse when you sign in.".to_owned(),
     };
     let on = *autostart == autostart::State::On;
     if switch_card(ui, "Start with Windows", &description, on) {

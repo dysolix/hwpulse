@@ -1,4 +1,4 @@
-; Per-user installer for the portable hwmon.exe. Build with installer\build.ps1,
+; Per-user installer for the portable hwpulse.exe. Build with installer\build.ps1,
 ; which passes the version from Cargo.toml.
 
 #ifndef AppVersion
@@ -15,19 +15,19 @@
 
 [Setup]
 AppId={{6E3F0B52-8C4A-4D1E-9B7A-2F5C1D8E4A93}
-AppName=Hardware Monitor
+AppName=HWPulse
 AppVersion={#AppVersion}
-AppVerName=Hardware Monitor {#AppVersion}
+AppVerName=HWPulse {#AppVersion}
 AppPublisher=dysolix
 VersionInfoVersion={#FileVersion}
 VersionInfoProductVersion={#AppVersion}
-VersionInfoProductName=Hardware Monitor
-VersionInfoDescription=Hardware Monitor Setup
-; "Install for me only" (default, no admin): %LOCALAPPDATA%\Programs\hwmon.
+VersionInfoProductName=HWPulse
+VersionInfoDescription=HWPulse Setup
+; "Install for me only" (default, no admin): %LOCALAPPDATA%\Programs\hwpulse.
 ; "Install for all users" (admin): Program Files, where only admins can replace the exe,
 ; so "Restart as administrator" cannot be used to run a swapped-in program elevated.
 ; Updates keep the mode of the existing install without asking again.
-DefaultDirName={autopf}\hwmon
+DefaultDirName={autopf}\hwpulse
 ; An empty folder left behind by an earlier uninstall is no reason to warn.
 DirExistsWarning=no
 DisableProgramGroupPage=yes
@@ -37,15 +37,15 @@ PrivilegesRequiredOverridesAllowed=dialog commandline
 UsedUserAreasWarning=no
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-; Close a running hwmon (Restart Manager) before replacing the exe.
+; Close a running hwpulse (Restart Manager) before replacing the exe.
 CloseApplications=yes
 RestartApplications=no
 SetupIconFile={#IconFile}
-UninstallDisplayIcon={app}\hwmon.exe
-UninstallDisplayName=Hardware Monitor
+UninstallDisplayIcon={app}\hwpulse.exe
+UninstallDisplayName=HWPulse
 WizardStyle=modern dynamic
 OutputDir=..\target\installer
-OutputBaseFilename=hwmon-setup-{#AppVersion}
+OutputBaseFilename=hwpulse-setup-{#AppVersion}
 Compression=lzma2/ultra64
 SolidCompression=yes
 
@@ -55,16 +55,16 @@ SolidCompression=yes
 Name: desktopicon; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: unchecked
 
 [Files]
-Source: "..\target\release\hwmon.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\target\release\hwpulse.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\Hardware Monitor"; Filename: "{app}\hwmon.exe"
-Name: "{autodesktop}\Hardware Monitor"; Filename: "{app}\hwmon.exe"; Tasks: desktopicon
+Name: "{autoprograms}\HWPulse"; Filename: "{app}\hwpulse.exe"
+Name: "{autodesktop}\HWPulse"; Filename: "{app}\hwpulse.exe"; Tasks: desktopicon
 
 [Registry]
 ; The value the app's "Start with Windows" switch writes (src/autostart.rs), removed
 ; on uninstall.
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "hwmon"; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "hwpulse"; Flags: uninsdeletevalue
 
 [UninstallDelete]
 ; Without this, the uninstaller keeps a folder that already existed before setup ran,
@@ -73,5 +73,5 @@ Type: dirifempty; Name: "{app}"
 
 [Run]
 ; As the user who started setup: after an all-users install, setup itself runs as admin,
-; and hwmon would otherwise start elevated.
-Filename: "{app}\hwmon.exe"; Description: "Launch Hardware Monitor"; Flags: nowait postinstall skipifsilent runasoriginaluser
+; and hwpulse would otherwise start elevated.
+Filename: "{app}\hwpulse.exe"; Description: "Launch HWPulse"; Flags: nowait postinstall skipifsilent runasoriginaluser

@@ -50,8 +50,8 @@ jobs:
         run: |
           # Only the first `version =` line is the package's own.
           sed -i "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml
-          # Same for the lock file entry right after `name = "hwmon"`.
-          sed -i "/^name = \"hwmon\"$/{n;s/^version = \".*\"/version = \"$VERSION\"/}" Cargo.lock
+          # Same for the lock file entry right after `name = "hwpulse"`.
+          sed -i "/^name = \"hwpulse\"$/{n;s/^version = \".*\"/version = \"$VERSION\"/}" Cargo.lock
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if ! git diff --quiet; then

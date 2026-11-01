@@ -47,13 +47,13 @@ jobs:
         run: |
           $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
           New-Item dist -ItemType Directory | Out-Null
-          Copy-Item target/release/hwmon.exe "dist/hwmon-$version-portable.exe"
-          Copy-Item "target/installer/hwmon-setup-$version.exe" dist/
+          Copy-Item target/release/hwpulse.exe "dist/hwpulse-$version-portable.exe"
+          Copy-Item "target/installer/hwpulse-setup-$version.exe" dist/
           Get-ChildItem dist | ForEach-Object {
             "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
           } | Set-Content dist/SHA256SUMS
           "version=$version" >> $env:GITHUB_OUTPUT
-          "artifact=hwmon-$version" >> $env:GITHUB_OUTPUT
+          "artifact=hwpulse-$version" >> $env:GITHUB_OUTPUT
 
       - uses: actions/upload-artifact@v4
         with:

@@ -13,7 +13,7 @@ const ROW: f32 = 26.0;
 
 pub fn page(ui: &mut Ui, model: &Model, settings: &mut Settings) {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Hardware Monitor").font(theme::semibold(14.0)).color(theme::TEXT));
+        ui.label(egui::RichText::new("HWPulse").font(theme::semibold(14.0)).color(theme::TEXT));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if super::link(ui, "Full view", theme::regular(12.5), theme::TEXT_DIM, true).clicked() {
                 settings.compact = false;

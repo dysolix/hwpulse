@@ -1,5 +1,5 @@
 //! Acting on processes (end, suspend, resume, priority, affinity, efficiency mode,
-//! dump files) and running hwmon as administrator. Without admin only processes of the
+//! dump files) and running hwpulse as administrator. Without admin only processes of the
 //! same user that are not elevated can be changed; as admin everything except protected
 //! processes (Defender, csrss …), like Task Manager.
 
@@ -174,7 +174,7 @@ pub fn dump(target: Target, name: &str) -> Result<PathBuf, Error> {
     let handle = open(target, PROCESS_QUERY_INFORMATION | PROCESS_VM_READ)?;
     let stem = name.strip_suffix(".exe").unwrap_or(name);
     // Only ever a new file (`name (2).DMP` when taken): %TEMP% is writable by every
-    // program of the user, which could plant a link there to make an elevated hwmon
+    // program of the user, which could plant a link there to make an elevated hwpulse
     // overwrite a protected file.
     let (path, file) = (1..100)
         .find_map(|n| {
@@ -237,7 +237,7 @@ fn open(target: Target, access: PROCESS_ACCESS_RIGHTS) -> Result<Handle, Error> 
     Ok(handle)
 }
 
-/// Whether hwmon itself runs as administrator.
+/// Whether hwpulse itself runs as administrator.
 pub fn is_elevated() -> bool {
     // Fixed for the process lifetime; asked on every frame by the table pages.
     static ELEVATED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

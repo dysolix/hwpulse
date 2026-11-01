@@ -69,9 +69,9 @@ jobs:
           trap 'rm -f "$key"' EXIT
           (umask 077; printf '%s\n' "$SIGNING_KEY" > "$key")
           for file in dist/*; do
-            minisign -S -s "$key" -m "$file" -t "hwmon $VERSION"
+            minisign -S -s "$key" -m "$file" -t "hwpulse $VERSION"
             # Catches a key that doesn't match the public key in the repo.
-            minisign -V -p installer/hwmon.pub -m "$file"
+            minisign -V -p installer/hwpulse.pub -m "$file"
           done
 
       - name: Create release
@@ -82,4 +82,4 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           gh release create "v$VERSION" dist/* \
-            --title "Hardware Monitor $VERSION" --generate-notes --verify-tag
+            --title "HWPulse $VERSION" --generate-notes --verify-tag

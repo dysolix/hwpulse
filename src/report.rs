@@ -199,7 +199,7 @@ fn string(s: &str) -> String {
     out
 }
 
-/// E.g. "Windows 11 Home 25H2 (build 26200)". Windows only, like the rest of hwmon.
+/// E.g. "Windows 11 Home 25H2 (build 26200)". Windows only, like the rest of hwpulse.
 fn os_version() -> Option<String> {
     let product = registry("ProductName")?;
     let build: u32 = registry("CurrentBuildNumber").and_then(|b| b.parse().ok()).unwrap_or(0);

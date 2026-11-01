@@ -648,7 +648,7 @@ mod tests {
         assert!(!efficiency(&mut details, &mut sampler));
         tasks::run(Action::Affinity(1), target).unwrap();
         assert_eq!(tasks::affinity(target).map(|(mask, _)| mask), Some(1));
-        let dump = tasks::dump(target, "hwmon-test-ping.exe").unwrap();
+        let dump = tasks::dump(target, "hwpulse-test-ping.exe").unwrap();
         assert!(std::fs::metadata(&dump).unwrap().len() > 0);
         std::fs::remove_file(dump).unwrap();
 

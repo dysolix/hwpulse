@@ -27,13 +27,13 @@ fn main() -> eframe::Result {
     let model = poller::spawn();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Hardware Monitor")
+            .with_title("HWPulse")
             .with_inner_size(first_size())
             .with_min_inner_size([520.0, 420.0])
             .with_icon(std::sync::Arc::new(ui::window::app_icon())),
         ..Default::default()
     };
-    eframe::run_native("hwmon", options, Box::new(|cc| Ok(Box::new(ui::App::new(cc, model)))))
+    eframe::run_native("hwpulse", options, Box::new(|cc| Ok(Box::new(ui::App::new(cc, model)))))
 }
 
 /// 1180 × 940, or less on small screens (a 1366 × 768 laptop): within the primary
@@ -44,7 +44,7 @@ fn first_size() -> [f32; 2] {
         SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
     };
     let mut area = RECT::default();
-    // hwmon is not DPI-aware yet at this point, so Windows answers in scaled units,
+    // hwpulse is not DPI-aware yet at this point, so Windows answers in scaled units,
     // which match egui's points.
     let ok = unsafe {
         SystemParametersInfoW(

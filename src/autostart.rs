@@ -14,9 +14,9 @@ use windows::Win32::System::Registry::{
 use windows::core::{HSTRING, w};
 
 const RUN_KEY: windows::core::PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
-/// Same value name as in `installer/hwmon.iss`, which removes it on uninstall.
-const VALUE: windows::core::PCWSTR = w!("hwmon");
-const NAME: &str = "hwmon";
+/// Same value name as in `installer/hwpulse.iss`, which removes it on uninstall.
+const VALUE: windows::core::PCWSTR = w!("hwpulse");
+const NAME: &str = "hwpulse";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum State {
@@ -94,7 +94,7 @@ fn registered_path() -> Option<PathBuf> {
     Some(PathBuf::from(command_path(&String::from_utf16_lossy(&buffer[..end]))))
 }
 
-/// `"C:\a b\hwmon.exe" --flag` → `C:\a b\hwmon.exe`; unquoted values up to the
+/// `"C:\a b\hwpulse.exe" --flag` → `C:\a b\hwpulse.exe`; unquoted values up to the
 /// first space after ".exe".
 pub fn command_path(command: &str) -> &str {
     let command = command.trim();
@@ -121,8 +121,8 @@ mod tests {
 
     #[test]
     fn exe_path_from_run_command() {
-        assert_eq!(command_path(r#""C:\Program Files\hwmon\hwmon.exe""#), r"C:\Program Files\hwmon\hwmon.exe");
-        assert_eq!(command_path(r#""C:\x\hwmon.exe" --minimized"#), r"C:\x\hwmon.exe");
-        assert_eq!(command_path(r"C:\x\hwmon.exe --minimized"), r"C:\x\hwmon.exe");
+        assert_eq!(command_path(r#""C:\Program Files\hwpulse\hwpulse.exe""#), r"C:\Program Files\hwpulse\hwpulse.exe");
+        assert_eq!(command_path(r#""C:\x\hwpulse.exe" --minimized"#), r"C:\x\hwpulse.exe");
+        assert_eq!(command_path(r"C:\x\hwpulse.exe --minimized"), r"C:\x\hwpulse.exe");
     }
 }
