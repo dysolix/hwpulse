@@ -6,12 +6,14 @@ use eframe::egui::{
     self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Margin, Stroke, TextStyle,
 };
 
+use crate::icon;
 use crate::sensors::{Kind, Unit};
 
 pub const BG: Color32 = Color32::from_rgb(0x0B, 0x0D, 0x12);
-pub const SURFACE: Color32 = Color32::from_rgb(0x13, 0x16, 0x1E);
+/// Shared with the app icon, see [`crate::icon`].
+pub const SURFACE: Color32 = rgb(icon::SURFACE);
 pub const BORDER: Color32 = Color32::from_rgb(0x21, 0x25, 0x32);
-pub const TRACK: Color32 = Color32::from_rgb(0x1F, 0x23, 0x30);
+pub const TRACK: Color32 = rgb(icon::TRACK);
 /// Hovered cards, active tab.
 pub const RAISED: Color32 = Color32::from_rgb(0x1C, 0x20, 0x2C);
 pub const BORDER_HOVER: Color32 = Color32::from_rgb(0x34, 0x3A, 0x4E);
@@ -52,26 +54,12 @@ pub fn kind_color(kind: Kind) -> Color32 {
     }
 }
 
+/// Cool to hot, the same gradient as the icon's gauge.
 pub fn heat(celsius: f64) -> Color32 {
-    const STOPS: [(f64, [u8; 3]); 4] = [
-        (35.0, [0x3D, 0xD6, 0xA6]),
-        (60.0, [0x9B, 0xD8, 0x4A]),
-        (72.0, [0xF5, 0xC5, 0x42]),
-        (85.0, [0xF2, 0x54, 0x5B]),
-    ];
-    if celsius <= STOPS[0].0 {
-        let [r, g, b] = STOPS[0].1;
-        return Color32::from_rgb(r, g, b);
-    }
-    for w in STOPS.windows(2) {
-        let ((t0, c0), (t1, c1)) = (w[0], w[1]);
-        if celsius <= t1 {
-            let t = ((celsius - t0) / (t1 - t0)) as f32;
-            let lerp = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
-            return Color32::from_rgb(lerp(c0[0], c1[0]), lerp(c0[1], c1[1]), lerp(c0[2], c1[2]));
-        }
-    }
-    let [r, g, b] = STOPS[3].1;
+    rgb(icon::heat(celsius))
+}
+
+const fn rgb([r, g, b]: [u8; 3]) -> Color32 {
     Color32::from_rgb(r, g, b)
 }
 

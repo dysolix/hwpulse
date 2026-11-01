@@ -14,6 +14,9 @@ if (-not $iscc) { throw 'Inno Setup 6 not found: winget install JRSoftware.InnoS
 cargo build --release --manifest-path "$root\Cargo.toml"
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 $fileVersion = ($version -split '[-+]')[0]
-& $iscc /Q "/DAppVersion=$version" "/DFileVersion=$fileVersion" "$PSScriptRoot\hwmon.iss"
+# The icon build.rs drew for this build (Cargo keeps one folder per build script hash).
+$icon = Get-ChildItem "$root\target\release\build\hwmon-*\out\hwmon.ico" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if (-not $icon) { throw 'hwmon.ico not found under target\release\build; did the build run?' }
+& $iscc /Q "/DAppVersion=$version" "/DFileVersion=$fileVersion" "/DIconFile=$($icon.FullName)" "$PSScriptRoot\hwmon.iss"
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 Get-Item "$root\target\installer\hwmon-setup-$version.exe"

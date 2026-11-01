@@ -8,6 +8,10 @@
 #ifndef FileVersion
   #define FileVersion AppVersion
 #endif
+; Drawn by build.rs into Cargo's build folder; build.ps1 passes its path.
+#ifndef IconFile
+  #error IconFile is not set; build with installer\build.ps1
+#endif
 
 [Setup]
 AppId={{6E3F0B52-8C4A-4D1E-9B7A-2F5C1D8E4A93}
@@ -34,7 +38,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ; Close a running hwmon (Restart Manager) before replacing the exe.
 CloseApplications=yes
 RestartApplications=no
-SetupIconFile=..\assets\hwmon.ico
+SetupIconFile={#IconFile}
 UninstallDisplayIcon={app}\hwmon.exe
 UninstallDisplayName=Hardware Monitor
 WizardStyle=modern dynamic
