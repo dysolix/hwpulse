@@ -1,5 +1,5 @@
-# Builds a tagged version and publishes the portable exe and the installer as a
-# GitHub Release. Started by the Version workflow, by pushing a tag like v1.2.3
+# Builds a tagged version, signs it and publishes the portable exe and the installer
+# as a GitHub Release. Started by the Version workflow, by pushing a tag like v1.2.3
 # (must match Cargo.toml), or by hand on a tag.
 name: Release
 
@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -38,11 +38,41 @@ jobs:
     # Linux minutes count once, Windows minutes twice.
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Holds the signing key and only admits v* tags. Separate from the build job, so
+    # the build scripts and proc macros of dependencies never run next to the key.
+    environment: release
+    permissions:
+      contents: write
     steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
       - uses: actions/download-artifact@v5
         with:
           name: ${{ needs.build.outputs.artifact }}
           path: dist
+
+      - name: Install minisign
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends minisign
+
+      - name: Sign files
+        shell: bash
+        env:
+          SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          key="$RUNNER_TEMP/signing.key"
+          trap 'rm -f "$key"' EXIT
+          (umask 077; printf '%s\n' "$SIGNING_KEY" > "$key")
+          for file in dist/*; do
+            minisign -S -s "$key" -m "$file" -t "hwmon $VERSION"
+            # Catches a key that doesn't match the public key in the repo.
+            minisign -V -p installer/hwmon.pub -m "$file"
+          done
 
       - name: Create release
         shell: bash

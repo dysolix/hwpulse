@@ -30,4 +30,4 @@ cargo run --release
 
 ## Release
 
-Run the **Version** workflow in GitHub Actions and pick the bump. It updates `Cargo.toml`, tags the commit and starts **Release**, which builds both files and publishes them.
+Run the **Version** workflow in GitHub Actions and pick the bump. It updates `Cargo.toml`, tags the commit and starts **Release**, which builds both files, signs them with [minisign](https://jedisct1.github.io/minisign/) and publishes them. The public key is `installer/hwmon.pub`.
