@@ -113,7 +113,7 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.apply_window_options(ui.ctx());
-        self.updater.tick(ui.ctx(), !self.settings.no_update_check);
+        self.updater.tick(ui.ctx(), self.settings.update_check);
         let mut model = self.model.lock();
         // The process list is built only while a page shows it.
         model.want_processes = !self.settings.compact && matches!(self.page, Page::Processes | Page::Users);
@@ -746,8 +746,8 @@ fn update_settings(ui: &mut Ui, settings: &mut Settings, updater: &mut Updater) 
          latest version.",
     );
     ui.add_space(6.0);
-    if switch_card(ui, "Check automatically", "Look for a new version once a day.", !settings.no_update_check) {
-        settings.no_update_check = !settings.no_update_check;
+    if switch_card(ui, "Check automatically", "Look for a new version once a day.", settings.update_check) {
+        settings.update_check = !settings.update_check;
     }
     let status = updater.status();
     let (text, color) = match &status {

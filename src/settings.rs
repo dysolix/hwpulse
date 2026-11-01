@@ -41,8 +41,8 @@ pub struct Settings {
     pub compact: bool,
     /// "Copy hardware" lists every component's details, not just its name.
     pub copy_details: bool,
-    /// The user switched off the daily check for a new release.
-    pub no_update_check: bool,
+    /// The user switched on the daily check for a new release.
+    pub update_check: bool,
 }
 
 /// When charts slide new samples in; otherwise they jump once per sample, which
