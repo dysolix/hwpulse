@@ -27,7 +27,3 @@ cargo run --release
 ```
 
 `installer\build.ps1` builds the release exe and the installer (needs [Inno Setup 6](https://jrsoftware.org/isinfo.php)).
-
-## Release
-
-Run the **Version** workflow in GitHub Actions and pick the bump. It updates `Cargo.toml`, tags the commit and starts **Release**, which builds both files, signs them with [minisign](https://jedisct1.github.io/minisign/) and publishes them. The public key is `installer/hwpulse.pub`.
