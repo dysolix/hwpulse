@@ -72,8 +72,8 @@ impl Shared {
         self.wake.notify_one();
     }
 
-    /// Builds the process list right away instead of at the next tick; call after
-    /// setting [`Model::want_processes`].
+    /// Builds the process list right away instead of at the next tick (or releases it
+    /// right away when no longer shown); call after setting [`Model::want_processes`].
     pub fn wake(&self) {
         self.wake.notify_one();
     }
@@ -101,11 +101,16 @@ pub fn spawn() -> Shared {
                 m.machine = providers.iter().find_map(|p| p.machine());
             }
 
+            let mut listing = false;
             loop {
                 let mut groups: Vec<Group> = providers.iter_mut().flat_map(|p| p.poll()).collect();
                 groups.sort_by_key(|g| g.order);
                 let want_processes = model.lock().unwrap().want_processes;
                 let processes = want_processes.then(|| process_table(&mut providers));
+                if listing && !want_processes {
+                    providers.iter_mut().for_each(|p| p.close_process_table());
+                }
+                listing = want_processes;
                 {
                     let mut m = model.lock().unwrap();
                     m.processes = processes;
@@ -146,11 +151,17 @@ pub fn spawn() -> Shared {
                         (ticked + Duration::from_millis(ms)).saturating_duration_since(Instant::now())
                     };
                     let unchanged = || INTERVAL_MS.load(Ordering::Relaxed) == ms && paused() == was_paused;
-                    let (guard, result) = wake.wait_timeout_while(m, timeout, |m| !wanted(m) && unchanged()).unwrap();
+                    let closed = |m: &mut Model| listing && !m.want_processes;
+                    let (guard, result) =
+                        wake.wait_timeout_while(m, timeout, |m| !wanted(m) && !closed(m) && unchanged()).unwrap();
                     m = guard;
-                    if wanted(&mut m) {
+                    if closed(&mut m) {
+                        providers.iter_mut().for_each(|p| p.close_process_table());
+                        listing = false;
+                    } else if wanted(&mut m) {
                         drop(m);
                         let table = process_table(&mut providers);
+                        listing = true;
                         m = model.lock().unwrap();
                         m.processes = Some(table);
                         repaint();

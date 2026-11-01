@@ -114,7 +114,10 @@ impl eframe::App for App {
         // The process list is built only while a page shows it.
         model.want_processes = !self.settings.compact && matches!(self.page, Page::Processes | Page::Users);
         if !model.want_processes {
-            model.processes = None;
+            // Lets the poller release the process handles right away.
+            if model.processes.take().is_some() {
+                self.model.wake();
+            }
         } else if model.processes.is_none() {
             self.model.wake();
         }

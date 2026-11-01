@@ -16,6 +16,13 @@ mod users;
 use eframe::egui;
 
 fn main() -> eframe::Result {
+    // DLLs loaded at run time (OpenGL, NVML …) come from System32 only, not from the
+    // exe's folder or the working directory; see build.rs for the imported ones.
+    let _ = unsafe {
+        windows::Win32::System::LibraryLoader::SetDefaultDllDirectories(
+            windows::Win32::System::LibraryLoader::LOAD_LIBRARY_SEARCH_SYSTEM32,
+        )
+    };
     let model = poller::spawn();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

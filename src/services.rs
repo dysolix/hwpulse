@@ -101,6 +101,11 @@ impl Drop for Handle {
 const TYPES: u32 = SERVICE_WIN32.0 | 0x40 | 0x80;
 
 pub fn list() -> Result<Vec<Service>, String> {
+    enumerate(true)
+}
+
+/// With `config`, also start type and group (registry reads, most of the cost).
+fn enumerate(config: bool) -> Result<Vec<Service>, String> {
     let scm = unsafe { OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ENUMERATE_SERVICE) }
         .map(Handle)
         .map_err(|e| e.message())?;
@@ -130,7 +135,7 @@ pub fn list() -> Result<Vec<Service>, String> {
         };
         for r in records {
             let name = unsafe { r.lpServiceName.to_string() }.unwrap_or_default();
-            let (group, start) = cached_config(&name);
+            let (group, start) = if config { cached_config(&name) } else { (None, None) };
             services.push(Service {
                 display: unsafe { r.lpDisplayName.to_string() }.unwrap_or_default(),
                 pid: r.ServiceStatusProcess.dwProcessId,
@@ -155,7 +160,7 @@ pub fn list() -> Result<Vec<Service>, String> {
 
 /// Names of the services running in process `pid`.
 pub fn for_pid(pid: u32) -> Vec<String> {
-    list().unwrap_or_default().into_iter().filter(|s| s.pid == pid && pid != 0).map(|s| s.name).collect()
+    enumerate(false).unwrap_or_default().into_iter().filter(|s| s.pid == pid && pid != 0).map(|s| s.name).collect()
 }
 
 /// [`config`], re-read at most every 30 s per service: the registry reads are most of

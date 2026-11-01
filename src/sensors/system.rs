@@ -656,6 +656,11 @@ impl SensorProvider for SystemProvider {
         let gpu = self.gpu.get_or_insert_with(GpuQuery::new).sample();
         Some(self.details.rows(&self.processes, &gpu))
     }
+
+    fn close_process_table(&mut self) {
+        self.details = Details::default();
+        self.gpu = None;
+    }
 }
 
 const MIB: f64 = 1024.0 * 1024.0;

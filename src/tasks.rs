@@ -173,8 +173,16 @@ pub fn dump(target: Target, name: &str) -> Result<PathBuf, Error> {
     use std::os::windows::io::AsRawHandle;
     let handle = open(target, PROCESS_QUERY_INFORMATION | PROCESS_VM_READ)?;
     let stem = name.strip_suffix(".exe").unwrap_or(name);
-    let path = std::env::temp_dir().join(format!("{stem}.DMP"));
-    let file = std::fs::File::create(&path).map_err(|e| Error::Other(e.to_string()))?;
+    // Only ever a new file (`name (2).DMP` when taken): %TEMP% is writable by every
+    // program of the user, which could plant a link there to make an elevated hwmon
+    // overwrite a protected file.
+    let (path, file) = (1..100)
+        .find_map(|n| {
+            let name = if n == 1 { format!("{stem}.DMP") } else { format!("{stem} ({n}).DMP") };
+            let path = std::env::temp_dir().join(name);
+            std::fs::OpenOptions::new().write(true).create_new(true).open(&path).ok().map(|f| (path, f))
+        })
+        .ok_or_else(|| Error::Other("no free file name in the temporary folder".into()))?;
     let kind = MINIDUMP_TYPE(
         MiniDumpWithFullMemory.0 | MiniDumpWithHandleData.0 | MiniDumpWithThreadInfo.0 | MiniDumpWithUnloadedModules.0,
     );
@@ -231,6 +239,12 @@ fn open(target: Target, access: PROCESS_ACCESS_RIGHTS) -> Result<Handle, Error> 
 
 /// Whether hwmon itself runs as administrator.
 pub fn is_elevated() -> bool {
+    // Fixed for the process lifetime; asked on every frame by the table pages.
+    static ELEVATED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ELEVATED.get_or_init(read_elevation)
+}
+
+fn read_elevation() -> bool {
     let mut token = HANDLE::default();
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.is_err() {
         return false;

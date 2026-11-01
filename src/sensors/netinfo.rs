@@ -48,6 +48,7 @@ pub fn adapters() -> Vec<Adapter> {
     let flags = GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST;
     let mut size = 16 * 1024u32;
     let mut buffer: Vec<u64> = Vec::new();
+    let mut filled = false;
     for _ in 0..3 {
         buffer = vec![0; (size as usize).div_ceil(8)];
         let status = unsafe {
@@ -59,7 +60,13 @@ pub fn adapters() -> Vec<Adapter> {
         if status != ERROR_SUCCESS.0 {
             return Vec::new();
         }
+        filled = true;
         break;
+    }
+    // Still too small after three tries (adapters keep appearing): the buffer holds no
+    // list, and reading it as one would follow garbage.
+    if !filled {
+        return Vec::new();
     }
 
     let mut result = Vec::new();

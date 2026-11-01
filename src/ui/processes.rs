@@ -477,7 +477,9 @@ pub fn page(ui: &mut Ui, model: &Model, settings: &mut Settings, state: &mut Sta
     table::notice(ui, &mut state.notice, "processes");
 
     let (delete, escape) = ui.input(|i| (i.key_pressed(Key::Delete), i.key_pressed(Key::Escape)));
-    let dialog_open = state.pending.is_some() || state.affinity.is_some() || state.run.is_some();
+    // Delete in the search field edits the text; it must not end the selected process.
+    let typing = ui.ctx().memory(|m| m.focused().is_some());
+    let dialog_open = typing || state.pending.is_some() || state.affinity.is_some() || state.run.is_some();
     if delete && !selected_rows.is_empty() && !dialog_open {
         request_end(state, &selected_rows, false, rows);
     }
@@ -509,7 +511,7 @@ pub fn page(ui: &mut Ui, model: &Model, settings: &mut Settings, state: &mut Sta
 /// with all its processes (browser helpers belong to the browser); one that lives in
 /// the Windows folder (or whose path is hidden, like System) is part of Windows.
 fn categorize(rows: &[ProcessRow]) -> HashMap<String, Category> {
-    let windows_dir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()).to_lowercase() + "\\";
+    let windows_dir = crate::shell::windows_dir().display().to_string().to_lowercase() + "\\";
     let mut categories: HashMap<String, Category> = HashMap::new();
     for r in rows {
         let own = if r.window.is_some() {

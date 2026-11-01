@@ -31,11 +31,28 @@ struct Gpu {
     process_timestamp: u64,
 }
 
+/// NVML by full path: System32, where current drivers put it, then the NVSMI folder of
+/// older ones. Never by bare name, which would also look next to the exe.
+fn load() -> Result<Nvml, NvmlError> {
+    let candidates = [
+        Some(crate::shell::system_dir().join("nvml.dll")),
+        crate::shell::program_files().map(|p| p.join(r"NVIDIA Corporation\NVSMI\nvml.dll")),
+    ];
+    let mut last = NvmlError::LibraryNotFound;
+    for path in candidates.into_iter().flatten().filter(|p| p.is_file()) {
+        match Nvml::builder().lib_path(path.as_os_str()).init() {
+            Ok(nvml) => return Ok(nvml),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
 impl NvmlProvider {
     /// `Ok(None)` when the machine simply has no NVIDIA GPU or driver; that is not
     /// an error worth showing. Other failures are reported.
     pub fn new() -> Result<Option<Self>, String> {
-        let nvml = match Nvml::init() {
+        let nvml = match load() {
             Ok(nvml) => nvml,
             Err(
                 NvmlError::LibloadingError(_)
@@ -294,11 +311,18 @@ impl Gpu {
         }
 
         // Component page only: bus traffic, individual fans, encoder sessions.
+        // NVML measures each direction over ~30 ms (waiting, no CPU); both at once halve
+        // the time the whole poll is held up.
         let pcie = |counter| d.pcie_throughput(counter).ok().map(|kb| kb as f64 * 1024.0);
-        if let Some(rx) = pcie(PcieUtilCounter::Receive) {
+        let (rx, tx) = std::thread::scope(|s| {
+            let rx = s.spawn(|| pcie(PcieUtilCounter::Receive));
+            let tx = pcie(PcieUtilCounter::Send);
+            (rx.join().ok().flatten(), tx)
+        });
+        if let Some(rx) = rx {
             readings.push(Reading::new("pcie_rx", "PCIe receive", rx, Unit::BytesPerSec).detail("to GPU"));
         }
-        if let Some(tx) = pcie(PcieUtilCounter::Send) {
+        if let Some(tx) = tx {
             readings.push(Reading::new("pcie_tx", "PCIe send", tx, Unit::BytesPerSec).detail("from GPU"));
         }
         if self.fan_count > 1 {

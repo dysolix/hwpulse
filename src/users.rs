@@ -99,6 +99,10 @@ mod tests {
     #[test]
     fn own_session_is_listed() {
         let own = super::current();
-        assert!(super::sessions().iter().any(|s| s.id == own && s.status == super::Status::Active));
+        let sessions = super::sessions();
+        // CI runs tests as a service in session 0, which has no user to list.
+        if own != 0 {
+            assert!(sessions.iter().any(|s| s.id == own && s.status == super::Status::Active));
+        }
     }
 }

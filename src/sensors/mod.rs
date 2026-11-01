@@ -206,6 +206,10 @@ pub trait SensorProvider {
     fn process_table(&mut self) -> Option<Vec<ProcessRow>> {
         None
     }
+
+    /// The process list is no longer shown: drop what [`Self::process_table`] keeps
+    /// (open process handles keep ended processes around in the kernel).
+    fn close_process_table(&mut self) {}
 }
 
 /// Builds every available provider. Failures are returned as messages for the UI

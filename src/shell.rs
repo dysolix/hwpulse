@@ -2,15 +2,50 @@
 //! and starting programs ("Run new task").
 
 use std::os::windows::process::CommandExt;
+use std::path::PathBuf;
 
 use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::Shell::{SHOP_FILEPATH, SHObjectProperties, ShellExecuteW};
+use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::SystemInformation::{GetSystemDirectoryW, GetWindowsDirectoryW};
+use windows::Win32::UI::Shell::{
+    FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, SHGetKnownFolderPath, SHOP_FILEPATH, SHObjectProperties, ShellExecuteW,
+};
 use windows::Win32::UI::WindowsAndMessaging::{IsIconic, SW_RESTORE, SW_SHOWNORMAL, SetForegroundWindow, ShowWindow};
 use windows::core::{HSTRING, PCWSTR, w};
 
+/// `C:\Windows\System32`, from Windows itself rather than an environment variable
+/// (which the user can change, also for an elevated hwmon).
+pub fn system_dir() -> PathBuf {
+    let mut buffer = [0u16; 260];
+    let len = unsafe { GetSystemDirectoryW(Some(&mut buffer)) } as usize;
+    PathBuf::from(String::from_utf16_lossy(&buffer[..len.min(buffer.len())]))
+}
+
+/// `C:\Windows`, see [`system_dir`].
+pub fn windows_dir() -> PathBuf {
+    let mut buffer = [0u16; 260];
+    let len = unsafe { GetWindowsDirectoryW(Some(&mut buffer)) } as usize;
+    PathBuf::from(String::from_utf16_lossy(&buffer[..len.min(buffer.len())]))
+}
+
+/// `C:\Program Files`, see [`system_dir`].
+pub fn program_files() -> Option<PathBuf> {
+    let path = unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, None) }.ok()?;
+    let text = unsafe { path.to_string() }.ok();
+    unsafe { CoTaskMemFree(Some(path.0 as *const _)) };
+    text.map(PathBuf::from)
+}
+
 /// Opens Explorer with the file selected.
 pub fn open_location(path: &str) {
-    let _ = std::process::Command::new("explorer.exe").raw_arg(format!("/select,\"{path}\"")).spawn();
+    let explorer = windows_dir().join("explorer.exe");
+    let _ = std::process::Command::new(explorer).raw_arg(format!("/select,\"{path}\"")).spawn();
+}
+
+/// The Services console, by full path so no `services.msc` in the working directory
+/// can stand in for it.
+pub fn open_services() {
+    open(&system_dir().join("services.msc").display().to_string());
 }
 
 /// The file's Properties dialog, as from Explorer.

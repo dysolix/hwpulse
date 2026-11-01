@@ -199,7 +199,7 @@ fn toolbar(ui: &mut Ui, state: &mut State, total: usize, shown: usize, selected:
         table::count(ui, if shown == total { format!("{total} services") } else { format!("{shown} of {total}") });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if table::button(ui, "Open Services", true, false).clicked() {
-                shell::open("services.msc");
+                shell::open_services();
             }
             let busy = state.running.is_some();
             let status = selected.map(|s| s.status);
@@ -257,7 +257,7 @@ fn row(ui: &mut Ui, state: &mut State, service: &Service, columns: &[(Column, f3
         }
         ui.separator();
         if ui.button("Open Services").clicked() {
-            shell::open("services.msc");
+            shell::open_services();
             close = true;
         }
         if ui.button("Search online").clicked() {
