@@ -605,6 +605,19 @@ mod tests {
         sampler.sample().processes.into_iter().find(|p| p.pid == pid)
     }
 
+    /// A thread only changes state when it is next scheduled, which can be after the
+    /// suspend or resume call has returned, on a busy machine noticeably so.
+    fn reaches_suspended(sampler: &mut Sampler, pid: u32, expected: bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while find(sampler, pid).unwrap().suspended != expected {
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        true
+    }
+
     #[test]
     fn suspend_resume_and_end_a_child() {
         let mut child = std::process::Command::new("ping").args(["-n", "30", "127.0.0.1"]).spawn().unwrap();
@@ -618,9 +631,9 @@ mod tests {
         assert_eq!(tasks::is_critical(target), Some(false));
 
         tasks::run(Action::Suspend, target).unwrap();
-        assert!(find(&mut sampler, pid).unwrap().suspended);
+        assert!(reaches_suspended(&mut sampler, pid, true));
         tasks::run(Action::Resume, target).unwrap();
-        assert!(!find(&mut sampler, pid).unwrap().suspended);
+        assert!(reaches_suspended(&mut sampler, pid, false));
 
         tasks::run(Action::Priority(tasks::Priority::BelowNormal), target).unwrap();
         assert_eq!(find(&mut sampler, pid).unwrap().priority, 6);
