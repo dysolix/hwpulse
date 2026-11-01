@@ -12,6 +12,7 @@ mod shell;
 mod startup;
 mod tasks;
 mod ui;
+mod update;
 mod users;
 
 use eframe::egui;
@@ -24,6 +25,7 @@ fn main() -> eframe::Result {
             windows::Win32::System::LibraryLoader::LOAD_LIBRARY_SEARCH_SYSTEM32,
         )
     };
+    update::clean_up();
     let model = poller::spawn();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

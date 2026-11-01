@@ -18,6 +18,8 @@ Download from [Releases](../../releases):
 - `hwpulse-setup-<version>.exe` installs for the current user (no admin rights) to `%LOCALAPPDATA%\Programs\hwpulse`, or, if you choose "Install for all users", to `Program Files` (admin rights). The all-users install is the safer choice if you use "Restart as administrator", since only admins can replace the exe there. Silent installs take `/CURRENTUSER` or `/ALLUSERS`.
 - `hwpulse-<version>-portable.exe` runs from anywhere
 
+hwpulse asks GitHub once a day whether a new release exists (Settings can switch this off) and installs one when you click, after checking its signature.
+
 Requires 64-bit Windows 10 or 11. The most detailed GPU readings need an NVIDIA GPU. Settings are stored in `%APPDATA%\hwpulse`.
 
 ## Build

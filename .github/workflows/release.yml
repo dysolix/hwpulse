@@ -69,7 +69,8 @@ jobs:
           trap 'rm -f "$key"' EXIT
           (umask 077; printf '%s\n' "$SIGNING_KEY" > "$key")
           for file in dist/*; do
-            minisign -S -s "$key" -m "$file" -t "hwpulse $VERSION"
+            # The updater (src/update.rs) requires exactly this comment.
+            minisign -S -s "$key" -m "$file" -t "hwpulse $VERSION $(basename "$file")"
             # Catches a key that doesn't match the public key in the repo.
             minisign -V -p installer/hwpulse.pub -m "$file"
           done

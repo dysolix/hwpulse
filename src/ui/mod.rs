@@ -16,7 +16,8 @@ use eframe::egui::{
 use crate::poller::{self, Model, Shared};
 use crate::sensors::Group;
 use crate::settings::{self, Settings};
-use crate::{autostart, tasks};
+use crate::update::{self, Updater};
+use crate::{autostart, shell, tasks};
 
 #[derive(Clone, Debug, PartialEq)]
 enum Page {
@@ -52,6 +53,7 @@ pub struct App {
     customizing: bool,
     /// Whether this copy starts with Windows; checked (and repaired) at startup.
     autostart: autostart::State,
+    updater: Updater,
 }
 
 impl App {
@@ -89,6 +91,7 @@ impl App {
             full_size: None,
             customizing: false,
             autostart: autostart::check(),
+            updater: Updater::new(),
         }
     }
 }
@@ -110,6 +113,7 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.apply_window_options(ui.ctx());
+        self.updater.tick(ui.ctx(), !self.settings.no_update_check);
         let mut model = self.model.lock();
         // The process list is built only while a page shows it.
         model.want_processes = !self.settings.compact && matches!(self.page, Page::Processes | Page::Users);
@@ -131,6 +135,7 @@ impl eframe::App for App {
         let processes = &mut self.processes;
         let autostart = &mut self.autostart;
         let customizing = &mut self.customizing;
+        let updater = &mut self.updater;
         // Navigation requested during this frame; applied after drawing.
         let mut nav: Option<Page> = None;
 
@@ -142,7 +147,8 @@ impl eframe::App for App {
         }
 
         CentralPanel::default().frame(Frame::new().fill(theme::BG).inner_margin(Margin::same(22))).show(ui, |ui| {
-            header(ui, &model, page, &mut nav);
+            let update_available = matches!(updater.status(), update::Status::Available(_));
+            header(ui, &model, page, update_available, &mut nav);
             title(ui, &model, page, settings, customizing);
             // These pages work without sensor data; the others wait for the first samples.
             let independent = matches!(page, Page::Settings | Page::Services | Page::Startup | Page::Users);
@@ -171,7 +177,7 @@ impl eframe::App for App {
                         dashboard(ui, &model, settings, &mut nav, customizing);
                         footer(ui, viewport_height - (ui.cursor().top() - content_top));
                     }
-                    Page::Settings => settings_page(ui, &model, settings, autostart),
+                    Page::Settings => settings_page(ui, &model, settings, autostart, updater),
                     _ => {}
                 }
             });
@@ -239,7 +245,7 @@ impl App {
 // ---------------------------------------------------------------------------
 // Header
 
-fn header(ui: &mut Ui, model: &Model, page: &Page, nav: &mut Option<Page>) {
+fn header(ui: &mut Ui, model: &Model, page: &Page, update_available: bool, nav: &mut Option<Page>) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::hover());
     let p = ui.painter().clone();
     let title = p.layout_no_wrap("HWPulse".to_owned(), theme::semibold(22.0), theme::TEXT);
@@ -332,6 +338,10 @@ fn header(ui: &mut Ui, model: &Model, page: &Page, nav: &mut Option<Page>) {
         }
         let color = if active || response.hovered() { theme::TEXT } else { theme::TEXT_DIM };
         p.text(tab.center(), Align2::CENTER_CENTER, title, font.clone(), color);
+        // Settings is where the update waits.
+        if update_available && target == Page::Settings {
+            p.circle_filled(tab.right_top() + vec2(-7.0, 6.0), 3.0, theme::ACCENT);
+        }
         if response.clicked() && page != &target {
             *nav = Some(target);
         }
@@ -710,14 +720,68 @@ fn cards(ui: &mut Ui, group: &Group, model: &Model, stretch: f32) {
 // Settings
 
 /// One section per topic; add new sections below the dashboard one.
-fn settings_page(ui: &mut Ui, model: &Model, settings: &mut Settings, autostart: &mut autostart::State) {
+fn settings_page(
+    ui: &mut Ui,
+    model: &Model,
+    settings: &mut Settings,
+    autostart: &mut autostart::State,
+    updater: &mut Updater,
+) {
     ui.add_space(4.0);
     speed_settings(ui, settings);
     chart_settings(ui, settings);
     window_settings(ui, settings);
     startup_settings(ui, autostart);
     hardware_settings(ui, model, settings);
+    update_settings(ui, settings, updater);
     about(ui);
+}
+
+fn update_settings(ui: &mut Ui, settings: &mut Settings, updater: &mut Updater) {
+    use update::Status;
+    section_heading(
+        ui,
+        "Updates",
+        "Nothing installs without your click, and only with a valid signature. Checking only asks GitHub for the \
+         latest version.",
+    );
+    ui.add_space(6.0);
+    if switch_card(ui, "Check automatically", "Look for a new version once a day.", !settings.no_update_check) {
+        settings.no_update_check = !settings.no_update_check;
+    }
+    let status = updater.status();
+    let (text, color) = match &status {
+        Status::Unknown => ("Not checked yet.".to_owned(), theme::TEXT_DIM),
+        Status::Checking => ("Checking\u{2026}".to_owned(), theme::TEXT_DIM),
+        Status::UpToDate => ("This is the latest version.".to_owned(), theme::TEXT_DIM),
+        Status::Available(version) if tasks::is_elevated() => (
+            format!("Version {version} is available. Restart hwpulse without administrator rights to install it."),
+            theme::TEXT,
+        ),
+        Status::Available(version) => (format!("Version {version} is available."), theme::TEXT),
+        Status::Installing(version) => {
+            (format!("Installing {version}; hwpulse restarts when it is done."), theme::TEXT_DIM)
+        }
+        Status::Failed(error) => (error.clone(), theme::ERROR),
+    };
+    ui.label(egui::RichText::new(text).font(theme::regular(13.0)).color(color));
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let busy = matches!(status, Status::Checking | Status::Installing(_));
+        if table::button(ui, "Check now", !busy, false).clicked() {
+            updater.check(ui.ctx());
+        }
+        if let Status::Available(version) = &status {
+            let label = format!("Install {version}");
+            if table::button(ui, &label, !tasks::is_elevated(), false).clicked() {
+                updater.install(ui.ctx(), version.clone());
+            }
+            if table::button(ui, "What's new", true, false).clicked() {
+                shell::open(&update::release_url(version));
+            }
+        }
+    });
+    ui.add_space(14.0);
 }
 
 fn about(ui: &mut Ui) {

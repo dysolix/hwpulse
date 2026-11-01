@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "persistence", "clipboard"] }
+minisign-verify = "0.3.0"
 nvml-wrapper = "0.13.0"
 raw-window-handle = "0.6"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -19,6 +20,7 @@ windows = { version = "0.62", features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_NetworkManagement_WiFi",
+    "Win32_Networking_WinHttp",
     "Win32_Networking_WinSock",
     "Win32_Security",
     "Win32_System_Com",

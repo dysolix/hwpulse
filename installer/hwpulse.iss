@@ -75,3 +75,11 @@ Type: dirifempty; Name: "{app}"
 ; As the user who started setup: after an all-users install, setup itself runs as admin,
 ; and hwpulse would otherwise start elevated.
 Filename: "{app}\hwpulse.exe"; Description: "Launch HWPulse"; Flags: nowait postinstall skipifsilent runasoriginaluser
+; The app's updater closes hwpulse and runs setup silently with /RELAUNCH=1.
+Filename: "{app}\hwpulse.exe"; Flags: nowait runasoriginaluser; Check: ShouldRelaunch
+
+[Code]
+function ShouldRelaunch(): Boolean;
+begin
+  Result := ExpandConstant('{param:relaunch|0}') = '1';
+end;
