@@ -862,14 +862,6 @@ fn window_settings(ui: &mut Ui, settings: &mut Settings) {
     ) {
         settings.minimize_on_use = !settings.minimize_on_use;
     }
-    if switch_card(
-        ui,
-        "Compact view",
-        "A small window with just the dashboard's values, like Task Manager's \u{201c}Fewer details\u{201d}.",
-        settings.compact,
-    ) {
-        settings.compact = !settings.compact;
-    }
     ui.add_space(14.0);
 }
 
