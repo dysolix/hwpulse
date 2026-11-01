@@ -1,5 +1,5 @@
-//! "Start with Windows" via the per-user `Run` key. The registry is the only source of
-//! truth, so the installer's checkbox and the switch in Settings always agree.
+//! "Start with Windows" via the per-user `Run` key, switched in Settings. The registry is
+//! the only source of truth, so the switch also reflects changes made elsewhere (Task Manager).
 //!
 //! The entry names one exe. Portable copies get moved (Downloads → somewhere
 //! permanent), so [`check`] repairs an entry whose exe no longer exists and tells a
@@ -14,8 +14,9 @@ use windows::Win32::System::Registry::{
 use windows::core::{HSTRING, w};
 
 const RUN_KEY: windows::core::PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
-/// Same value name as in `installer/hwmon.iss`.
+/// Same value name as in `installer/hwmon.iss`, which removes it on uninstall.
 const VALUE: windows::core::PCWSTR = w!("hwmon");
+const NAME: &str = "hwmon";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum State {
@@ -30,6 +31,11 @@ pub enum State {
 /// was moved), points it to this exe. Never creates an entry. Call once at startup.
 pub fn check() -> State {
     let Some(registered) = registered_path() else { return State::Off };
+    // Switched off in Task Manager (or on the Startup apps page): the entry stays,
+    // but Windows skips it.
+    if !crate::startup::user_run_enabled(NAME) {
+        return State::Off;
+    }
     let Ok(exe) = std::env::current_exe() else { return State::Off };
     if same_file(&registered, &exe) {
         State::On
@@ -52,7 +58,10 @@ pub fn set(on: bool) -> windows::core::Result<()> {
         unsafe {
             RegSetKeyValueW(HKEY_CURRENT_USER, RUN_KEY, VALUE, REG_SZ.0, Some(command.as_ptr().cast()), bytes as u32)
         }
-        .ok()
+        .ok()?;
+        // Also lift a "disabled" left by Task Manager, or the entry would stay skipped.
+        crate::startup::set_user_run_enabled(NAME, true)
+            .map_err(|e| windows::core::Error::new(windows::core::HRESULT(-1), format!("{e:?}")))
     } else {
         match unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, VALUE) } {
             ERROR_FILE_NOT_FOUND => Ok(()),

@@ -37,7 +37,8 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 
 [Tasks]
-Name: autostart; Description: "Start with Windows"; GroupDescription: "Startup:"; Flags: unchecked
+; "Start with Windows" is only in the app's Settings: it writes the Run entry of the
+; user who switches it on, which an installer running elevated cannot always do.
 Name: desktopicon; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: unchecked
 
 [Files]
@@ -48,9 +49,8 @@ Name: "{autoprograms}\Hardware Monitor"; Filename: "{app}\hwmon.exe"
 Name: "{autodesktop}\Hardware Monitor"; Filename: "{app}\hwmon.exe"; Tasks: desktopicon
 
 [Registry]
-; Same value the app's "Start with Windows" switch writes (src/autostart.rs).
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "hwmon"; ValueData: """{app}\hwmon.exe"""; Tasks: autostart
-; Removed on uninstall even if it was switched on later in the app.
+; The value the app's "Start with Windows" switch writes (src/autostart.rs), removed
+; on uninstall.
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "hwmon"; Flags: uninsdeletevalue
 
 [Run]

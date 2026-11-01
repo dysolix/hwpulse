@@ -146,7 +146,22 @@ fn approval(source: Source, key: &str) -> (bool, Option<i64>) {
 
 /// Switches an entry on or off the way Task Manager does.
 pub fn set_enabled(entry: &Entry, on: bool) -> Result<(), Error> {
-    let (root, path) = entry.source.approved();
+    set_approval(entry.source, &entry.key, on)
+}
+
+/// Whether the user's `Run` value `name` is allowed to start (not switched off in
+/// Task Manager or on the Startup apps page).
+pub fn user_run_enabled(name: &str) -> bool {
+    approval(Source::UserRun, name).0
+}
+
+/// Allows or blocks the user's `Run` value `name`.
+pub fn set_user_run_enabled(name: &str, on: bool) -> Result<(), Error> {
+    set_approval(Source::UserRun, name, on)
+}
+
+fn set_approval(source: Source, key: &str, on: bool) -> Result<(), Error> {
+    let (root, path) = source.approved();
     let mut data = [0u8; 12];
     if on {
         data[0] = 2;
@@ -157,14 +172,7 @@ pub fn set_enabled(entry: &Entry, on: bool) -> Result<(), Error> {
         data[4..].copy_from_slice(&time.to_le_bytes());
     }
     let result = unsafe {
-        RegSetKeyValueW(
-            root,
-            &HSTRING::from(path),
-            &HSTRING::from(&*entry.key),
-            REG_BINARY.0,
-            Some(data.as_ptr().cast()),
-            12,
-        )
+        RegSetKeyValueW(root, &HSTRING::from(path), &HSTRING::from(key), REG_BINARY.0, Some(data.as_ptr().cast()), 12)
     };
     match result {
         r if r.is_ok() => Ok(()),

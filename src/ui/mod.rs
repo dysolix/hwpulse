@@ -830,7 +830,7 @@ fn chart_settings(ui: &mut Ui, settings: &mut Settings) {
 
 /// `autostart` mirrors the registry and is re-read after every change.
 fn startup_settings(ui: &mut Ui, autostart: &mut autostart::State) {
-    section_heading(ui, "Startup", "Stored in Windows, so it matches the choice made in the installer.");
+    section_heading(ui, "Startup", "Stored in Windows for your account only; other users switch it on themselves.");
     ui.add_space(6.0);
     let description = match autostart {
         autostart::State::OtherCopy(path) => {
