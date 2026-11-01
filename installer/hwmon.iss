@@ -19,9 +19,16 @@ VersionInfoVersion={#FileVersion}
 VersionInfoProductVersion={#AppVersion}
 VersionInfoProductName=Hardware Monitor
 VersionInfoDescription=Hardware Monitor Setup
-DefaultDirName={localappdata}\Programs\hwmon
+; "Install for me only" (default, no admin): %LOCALAPPDATA%\Programs\hwmon.
+; "Install for all users" (admin): Program Files, where only admins can replace the exe,
+; so "Restart as administrator" cannot be used to run a swapped-in program elevated.
+; Updates keep the mode of the existing install without asking again.
+DefaultDirName={autopf}\hwmon
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=dialog commandline
+; The only per-user entry is the uninstall cleanup of "Start with Windows" below.
+UsedUserAreasWarning=no
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ; Close a running hwmon (Restart Manager) before replacing the exe.
