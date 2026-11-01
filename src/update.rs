@@ -35,8 +35,10 @@ const FIRST_CHECK: Duration = Duration::from_secs(10);
 const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 /// Folders in the temp directory that hold a downloaded setup.
 const TEMP_PREFIX: &str = "hwpulse-update-";
-/// Keys a release may be signed with.
-const TRUSTED_KEYS: &[&str] = &[include_str!("../installer/hwpulse.pub")];
+/// Keys a release may be signed with. The backup key is kept offline: if the release key
+/// leaks or is lost, releases signed with the backup key still reach every installed copy.
+const TRUSTED_KEYS: &[&str] =
+    &[include_str!("../installer/hwpulse.pub"), include_str!("../installer/hwpulse-backup.pub")];
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
