@@ -11,12 +11,16 @@ $iscc = @(
 ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
 if (-not $iscc) { throw 'Inno Setup 6 not found: winget install JRSoftware.InnoSetup' }
 
-cargo build --release --manifest-path "$root\Cargo.toml"
+# Cargo reports where hwmon's build script wrote its files, including the icon it drew;
+# older build folders from earlier versions of build.rs may still be lying around.
+$messages = cargo build --release --manifest-path "$root\Cargo.toml" --message-format=json-render-diagnostics
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
+$outDir = $messages | ForEach-Object { $_ | ConvertFrom-Json } |
+    Where-Object { $_.reason -eq 'build-script-executed' -and $_.package_id -match '#hwmon@|/hwmon#|\bhwmon ' } |
+    Select-Object -Last 1 -ExpandProperty out_dir
+$icon = Join-Path "$outDir" 'hwmon.ico'
+if (-not $outDir -or -not (Test-Path $icon)) { throw "hwmon.ico not found (build script output: '$outDir')" }
 $fileVersion = ($version -split '[-+]')[0]
-# The icon build.rs drew for this build (Cargo keeps one folder per build script hash).
-$icon = Get-ChildItem "$root\target\release\build\hwmon-*\out\hwmon.ico" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (-not $icon) { throw 'hwmon.ico not found under target\release\build; did the build run?' }
-& $iscc /Q "/DAppVersion=$version" "/DFileVersion=$fileVersion" "/DIconFile=$($icon.FullName)" "$PSScriptRoot\hwmon.iss"
+& $iscc /Q "/DAppVersion=$version" "/DFileVersion=$fileVersion" "/DIconFile=$icon" "$PSScriptRoot\hwmon.iss"
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 Get-Item "$root\target\installer\hwmon-setup-$version.exe"

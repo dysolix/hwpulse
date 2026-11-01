@@ -65,4 +65,6 @@ Name: "{autodesktop}\Hardware Monitor"; Filename: "{app}\hwmon.exe"; Tasks: desk
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "hwmon"; Flags: uninsdeletevalue
 
 [Run]
-Filename: "{app}\hwmon.exe"; Description: "Launch Hardware Monitor"; Flags: nowait postinstall skipifsilent
+; As the user who started setup: after an all-users install, setup itself runs as admin,
+; and hwmon would otherwise start elevated.
+Filename: "{app}\hwmon.exe"; Description: "Launch Hardware Monitor"; Flags: nowait postinstall skipifsilent runasoriginaluser

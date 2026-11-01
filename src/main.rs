@@ -28,10 +28,35 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Hardware Monitor")
-            .with_inner_size([1180.0, 940.0])
+            .with_inner_size(first_size())
             .with_min_inner_size([520.0, 420.0])
             .with_icon(std::sync::Arc::new(ui::window::app_icon())),
         ..Default::default()
     };
     eframe::run_native("hwmon", options, Box::new(|cc| Ok(Box::new(ui::App::new(cc, model)))))
+}
+
+/// 1180 × 940, or less on small screens (a 1366 × 768 laptop): within the primary
+/// screen's work area, minus room for the title bar. Later starts reopen at the last size.
+fn first_size() -> [f32; 2] {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+    };
+    let mut area = RECT::default();
+    // hwmon is not DPI-aware yet at this point, so Windows answers in scaled units,
+    // which match egui's points.
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            Some(&mut area as *mut _ as *mut _),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    let (width, height) = match ok {
+        Ok(()) => ((area.right - area.left) as f32 - 40.0, (area.bottom - area.top) as f32 - 60.0),
+        Err(_) => (f32::MAX, f32::MAX),
+    };
+    [1180f32.min(width).max(520.0), 940f32.min(height).max(420.0)]
 }
