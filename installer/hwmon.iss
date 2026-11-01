@@ -28,6 +28,8 @@ VersionInfoDescription=Hardware Monitor Setup
 ; so "Restart as administrator" cannot be used to run a swapped-in program elevated.
 ; Updates keep the mode of the existing install without asking again.
 DefaultDirName={autopf}\hwmon
+; An empty folder left behind by an earlier uninstall is no reason to warn.
+DirExistsWarning=no
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog commandline
@@ -63,6 +65,11 @@ Name: "{autodesktop}\Hardware Monitor"; Filename: "{app}\hwmon.exe"; Tasks: desk
 ; The value the app's "Start with Windows" switch writes (src/autostart.rs), removed
 ; on uninstall.
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "hwmon"; Flags: uninsdeletevalue
+
+[UninstallDelete]
+; Without this, the uninstaller keeps a folder that already existed before setup ran,
+; so one leftover would survive every later install and uninstall.
+Type: dirifempty; Name: "{app}"
 
 [Run]
 ; As the user who started setup: after an all-users install, setup itself runs as admin,
