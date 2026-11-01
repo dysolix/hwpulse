@@ -39,8 +39,8 @@ pub struct Settings {
     pub speed: Speed,
     /// The small window with just the dashboard's values.
     pub compact: bool,
-    /// "Copy hardware" lists only component names, not their details.
-    pub copy_names_only: bool,
+    /// "Copy hardware" lists every component's details, not just its name.
+    pub copy_details: bool,
 }
 
 /// When charts slide new samples in; otherwise they jump once per sample, which

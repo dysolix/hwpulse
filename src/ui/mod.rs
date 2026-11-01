@@ -717,6 +717,15 @@ fn settings_page(ui: &mut Ui, model: &Model, settings: &mut Settings, autostart:
     window_settings(ui, settings);
     startup_settings(ui, autostart);
     hardware_settings(ui, model, settings);
+    about(ui);
+}
+
+fn about(ui: &mut Ui) {
+    ui.label(egui::RichText::new("About").font(theme::semibold(16.0)).color(theme::TEXT));
+    ui.add_space(-8.0);
+    let text = format!("Hardware Monitor {}", env!("CARGO_PKG_VERSION"));
+    ui.label(egui::RichText::new(text).font(theme::regular(13.0)).color(theme::TEXT_DIM));
+    ui.add_space(14.0);
 }
 
 /// Copies the hardware summary in the chosen format; the button says so for a moment.
@@ -734,10 +743,10 @@ fn hardware_settings(ui: &mut Ui, model: &Model, settings: &mut Settings) {
     let copied: Option<(Format, f64)> = ui.data(|d| d.get_temp(id)).filter(|(_, at)| now - at < 2.0);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        for (label, names_only) in [("Detailed", false), ("Names only", true)] {
-            let on = settings.copy_names_only == names_only;
+        for (label, details) in [("Names only", false), ("Detailed", true)] {
+            let on = settings.copy_details == details;
             if widgets::chip(ui, label, on, true, theme::ACCENT).clicked() {
-                settings.copy_names_only = names_only;
+                settings.copy_details = details;
             }
         }
         ui.add_space(12.0);
@@ -748,7 +757,7 @@ fn hardware_settings(ui: &mut Ui, model: &Model, settings: &mut Settings) {
             };
             if table::button(ui, &label, !model.groups.is_empty(), false).clicked() {
                 let report = Report::new(model.machine.as_deref(), &model.groups);
-                ui.ctx().copy_text(report.format(format, !settings.copy_names_only));
+                ui.ctx().copy_text(report.format(format, settings.copy_details));
                 ui.data_mut(|d| d.insert_temp(id, (format, now)));
                 ui.ctx().request_repaint_after(std::time::Duration::from_secs(2));
             }
