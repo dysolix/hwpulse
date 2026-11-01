@@ -51,7 +51,7 @@ jobs:
           Copy-Item "target/installer/hwmon-setup-$version.exe" dist/
           Get-ChildItem dist | ForEach-Object {
             "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
-          } | Set-Content dist/SHA256SUMS.txt
+          } | Set-Content dist/SHA256SUMS
           "version=$version" >> $env:GITHUB_OUTPUT
           "artifact=hwmon-$version" >> $env:GITHUB_OUTPUT
 
